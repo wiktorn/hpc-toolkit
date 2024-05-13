@@ -87,6 +87,25 @@ variable "additional_disks" {
   default     = []
 }
 
+variable "additional_networks" {
+  description = "Additional network interface details for GCE, if any."
+  default     = []
+  type = list(object({
+    network            = string
+    subnetwork         = optional(string)
+    subnetwork_project = optional(string)
+    network_ip         = optional(string, "")
+    access_config = optional(list(object({
+      nat_ip       = string
+      network_tier = string
+    })), [])
+    ipv6_access_config = optional(list(object({
+      network_tier = string
+    })), [])
+  }))
+  nullable = false
+}
+
 variable "disable_smt" {
   type        = bool
   description = "Disables Simultaneous Multi-Threading (SMT) on instance."
