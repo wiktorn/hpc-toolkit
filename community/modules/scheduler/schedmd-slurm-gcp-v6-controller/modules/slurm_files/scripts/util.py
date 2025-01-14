@@ -1218,6 +1218,9 @@ class TPU:
             "V2": tpu.AcceleratorConfig().Type.V2,
             "V3": tpu.AcceleratorConfig().Type.V3,
             "V4": tpu.AcceleratorConfig().Type.V4,
+            "V5e": tpu.AcceleratorConfig().Type.V5LITE_POD,
+            "V5p": tpu.AcceleratorConfig().Type.V5P,
+            "V6e": tpu.AcceleratorConfig().Type.V6E,
         }
 
     def __init__(self, nodeset):
