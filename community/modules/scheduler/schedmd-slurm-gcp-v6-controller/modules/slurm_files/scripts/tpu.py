@@ -47,6 +47,9 @@ class TPU:
         "V2": tpu.AcceleratorConfig().Type.V2,
         "V3": tpu.AcceleratorConfig().Type.V3,
         "V4": tpu.AcceleratorConfig().Type.V4,
+        "V5e": tpu.AcceleratorConfig().Type.V5LITE_POD,
+        "V5p": tpu.AcceleratorConfig().Type.V5P,
+        "V6e": tpu.AcceleratorConfig().Type.V6E,
     }
 
     @classmethod
@@ -96,8 +99,8 @@ class TPU:
         return self._nodeset.node_type
 
     @property
-    def tf_version(self):
-        return self._nodeset.tf_version
+    def runtime_version(self):
+        return self._nodeset.runtime_version
 
     @property
     def enable_public_ip(self):
@@ -133,7 +136,7 @@ class TPU:
     def check_tf_version(self):
         try:
             request = tpu.GetRuntimeVersionRequest(
-                name=f"{self._parent}/runtimeVersions/{self.tf_version}"
+                name=f"{self._parent}/runtimeVersions/{self.runtime_version}"
             )
             return self._client.get_runtime_version(request=request) is not None
         except Exception:
@@ -208,7 +211,7 @@ class TPU:
 
         node = tpu.Node()
         node.accelerator_config = self.ac
-        node.runtime_version = f"tpu-vm-tf-{self.tf_version}"
+        node.runtime_version = self.runtime_version
         startup_script = """
         #!/bin/bash
         echo "startup script not found > /var/log/startup_error.log"
@@ -309,7 +312,7 @@ def start_tpu(node: List[str]):
     if len(node) == 1:
         node = node[0]
         log.debug(
-            f"Will create a TPU of type {tpuobj.node_type} tf_version {tpuobj.tf_version} in zone {tpuobj.zone} with name {node}"
+            f"Will create a TPU of type {tpuobj.node_type} runtime_version {tpuobj.runtime_version} in zone {tpuobj.zone} with name {node}"
         )
         tpunode = tpuobj.get_node(node)
         if tpunode is None:
@@ -325,7 +328,7 @@ def start_tpu(node: List[str]):
                 )
     else:
         log.debug(
-            f"Will create a multi-vm TPU of type {tpuobj.node_type} tf_version {tpuobj.tf_version} in zone {tpuobj.zone} with name {node[0]}"
+            f"Will create a multi-vm TPU of type {tpuobj.node_type} tf_version {tpuobj.runtime_version} in zone {tpuobj.zone} with name {node[0]}"
         )
         if not tpuobj.create_node(nodename=node):
             log.error("Error creating tpu node {node}")
