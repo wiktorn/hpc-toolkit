@@ -77,15 +77,15 @@ variable "accelerator_config" {
     error_message = "accelerator_config.version must be one of [\"V2\", \"V3\", \"V4\", \"V5e\", \"V5p\", \"V6e\"]"
   }
   validation {
-    condition     = var.accelerator_config.topology == "" ? true : can(regex("^[1-9]x[1-9](x[1-9])?$", var.accelerator_config.topology))
+    condition     = var.accelerator_config.topology == "" ? true : can(regex("^[1-9]+x[1-9]+(x[1-9])?$", var.accelerator_config.topology))
     error_message = "accelerator_config.topology must be a valid topology, like 2x2 4x4x4 4x2x4 etc..."
   }
 }
 
-variable "tf_version" {
-  description = "Nodeset Tensorflow version, see https://cloud.google.com/tpu/docs/supported-tpu-configurations#tpu_vm for details."
+variable "runtime_version" {
+  description = "Nodeset runtinme version, see https://cloud.google.com/tpu/docs/runtimes#tpu_vm for details."
   type        = string
-  default     = "2.14.0"
+  default     = "tpu-ubuntu2204-base"
 }
 
 variable "preemptible" {

@@ -1,0 +1,344 @@
+# Copyright 2022 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+---
+
+blueprint_name: tpu-v6
+
+vars:
+  project_id: ## Set GCP Project ID Here ##
+  deployment_name: tpu-v6
+  region: us-east5
+  zone: us-east5-b
+  instance_image:
+    project: $(vars.project_id)
+    family: tpu-v6-image
+  disk_size_gb: 100
+  instance_image_custom: true
+  resume_timeout: 600
+  docker_image: us-docker.pkg.dev/wns-gsk-hpc/regus/slurm-tpu:2.15.0
+  runtime_version: v2-alpha-tpuv6e # 2.18.0-pjrt-v5e-and-v6 # 2.18.0-pjrt-v5e-and-v6 # 2.14.0 #tf_version
+
+deployment_groups:
+- group: primary
+  modules:
+  - id: network
+    source: modules/network/vpc
+
+  - id: script
+    source: modules/scripts/startup-script
+    settings:
+      runners:
+      - type: shell
+        destination: tpu_setup.sh
+        content: |
+          #!/bin/bash
+          mkdir -p /opt/apps/scripts/tpu-test
+          chmod a+rwx /opt/apps/scripts/tpu-test
+
+      - type: data
+        destination: /opt/apps/scripts/tpu-test/copy_dataset.sh
+        content: |
+          #!/bin/bash
+          set -o xtrace
+          # gsutil -u $(vars.project_id) -m cp 'gs://allennlp-tensorflow-datasets/c4/en/3.0.1/*' $(bucket_dataset.gcs_bucket_path)/c4/en/3.0.1
+          gcloud storage rsync --billing-project $(vars.project_id) 'gs://allennlp-tensorflow-datasets/c4/en/3.0.1' $(bucket_dataset.gcs_bucket_path)/c4/en/3.0.1
+
+      - type: data
+        destination: /opt/apps/scripts/tpu-test/run_maxtext.sh
+        content: |
+          #!/bin/bash
+          # Update the following parameters in the python3 command in this script.
+          # RUN_NAME: (required, see https://github.com/google/maxtext?tab=readme-ov-file#overview)
+          # STORAGE_BUCKET: GCS bucket where dataset is stored. (i.e.: gs://dataset-tpu/dataset)
+          # ATTENTION: (i.e. dot_product, flash)
+          # STEPS: steps to run (i.e. 100, 1000)
+
+          #SBATCH --nodes=1
+          #SBATCH --ntasks-per-node=1
+          #SBATCH --mem=50000
+          #SBATCH --partition=tpu
+
+          set -e -o pipefail
+
+          # Start virtual environment.
+          virtualenv venv
+          source venv/local/bin/activate
+
+          # Clone maxtext repository, lock version of maxtext and
+          # install dependencies.
+          git clone https://github.com/google/maxtext
+          cd maxtext/
+          # git reset --hard 39a3f19e832016741be803ef5253333e2f434cb8 - doesn't work due to broken dependencies
+          bash setup.sh MODE=stable
+
+          # Run maxtext benchmark test.
+          # (i.e.) python3 MaxText/train.py MaxText/configs/base.yml run_name=1xv4-128 base_output_directory=${PWD}/output/ dataset_path=gs://dataset_tpu/dataset async_checkpointing=False attention=dot_product steps=100
+          # python3 MaxText/train.py MaxText/configs/base.yml run_name=<RUN_NAME> base_output_directory=${PWD}/output/ dataset_path=$(bucket_dataset.gcs_bucket_path)/ async_checkpointing=False attention=flash steps=100
+          bash MaxText/configs/v5e/16b.sh RUN_NAME="run_\$(date +%Y%m%d%H%M%S)" OUTPUT_PATH="$(bucket_output.gcs_bucket_path)" DATASET_PATH="$(bucket_dataset.gcs_bucket_path)/c4/en/3.0.1"
+
+  - id: bucket_dataset
+    source: community/modules/file-system/cloud-storage-bucket
+    settings:
+      local_mount: /dataset
+      name_prefix: $(vars.project_id)-dataset
+      random_suffix: false
+      use_deployment_name_in_bucket_name: false
+      mount_options: defaults,_netdev,allow_other,dir_mode=777,file_mode=777,type_cache_max_size_mb=-1,stat_cache_max_size_mb=-1,kernel_list_cache_ttl_secs=-1,metadata_cache_ttl_secs=-1
+
+  - id: bucket_output
+    source: community/modules/file-system/cloud-storage-bucket
+    settings:
+      local_mount: /output
+      name_prefix: $(vars.project_id)-output
+      random_suffix: false
+      use_deployment_name_in_bucket_name: false
+      mount_options: defaults,_netdev,allow_other,dir_mode=777,file_mode=777
+
+
+  - id: controller_sa
+    source: community/modules/project/service-account
+    settings:
+      name: controller
+      display_name: controller
+      project_roles:
+      - compute.instanceAdmin.v1
+      - iam.serviceAccountUser
+      - logging.logWriter
+      - monitoring.metricWriter
+      - pubsub.admin
+      - storage.objectViewer
+      - tpu.admin
+
+  - id: login_sa
+    source: community/modules/project/service-account
+    settings:
+      name: login
+      display_name: login
+      project_roles:
+      - logging.logWriter
+      - monitoring.metricWriter
+      - storage.objectViewer
+      - storage.objectUser
+      - serviceusage.serviceUsageConsumer # needed to copy input dataset
+
+  - id: compute_sa
+    source: community/modules/project/service-account
+    settings:
+      name: compute
+      display_name: compute
+      project_roles:
+      - artifactregistry.reader
+      - logging.logWriter
+      - monitoring.metricWriter
+      - storage.objectUser
+      - storage.objectViewer
+      # - storage.legacyBucketReader  # needed to get storage.bucket.get
+      - storage.admin  # needed to get storage.bucket.get
+
+  - id: tpu_nodeset-1
+    source: community/modules/compute/schedmd-slurm-gcp-v6-nodeset-tpu
+    use: [network]
+    settings:
+#      accelerator_config:
+#        version: V6e
+#        topology: 1x1
+      node_type: v6e-1
+      preserve_tpu: false
+      node_count_dynamic_max: 32
+      service_account_email: $(compute_sa.service_account_email)
+
+  - id: tpu_nodeset-4
+    source: community/modules/compute/schedmd-slurm-gcp-v6-nodeset-tpu
+    use: [network]
+    settings:
+#      accelerator_config:
+#        version: V6e
+#        topology: 2x2
+      node_type: v6e-4
+      preemptible: false
+      preserve_tpu: false
+      node_count_dynamic_max: 64
+      service_account_email: $(compute_sa.service_account_email)
+
+  - id: tpu_nodeset-8
+    source: community/modules/compute/schedmd-slurm-gcp-v6-nodeset-tpu
+    use: [network]
+    settings:
+#      accelerator_config:
+#        version: V6e
+#        topology: 2x4
+      node_type: v6e-8
+      preemptible: false
+      preserve_tpu: false
+      node_count_dynamic_max: 64
+
+  - id: tpu_nodeset-16
+    source: community/modules/compute/schedmd-slurm-gcp-v6-nodeset-tpu
+    use: [network]
+    settings:
+#      accelerator_config:
+#        version: V6e
+#        topology: 4x4
+      node_type: v6e-16
+      preemptible: false
+      preserve_tpu: false
+      node_count_dynamic_max: 64
+      service_account_email: $(compute_sa.service_account_email)
+
+  - id: tpu_nodeset-32
+    source: community/modules/compute/schedmd-slurm-gcp-v6-nodeset-tpu
+    use: [network]
+    settings:
+#      accelerator_config:
+#        version: V6e
+#        topology: 4x8
+      node_type: v6e-32
+      preemptible: false
+      preserve_tpu: false
+      node_count_dynamic_max: 64
+
+  - id: tpu_nodeset-64
+    source: community/modules/compute/schedmd-slurm-gcp-v6-nodeset-tpu
+    use: [network]
+    settings:
+#      accelerator_config:
+#        version: V6e
+#        topology: 8x8
+      node_type: v6e-64
+      preemptible: false
+      preserve_tpu: false
+      node_count_dynamic_max: 64
+      service_account_email: $(compute_sa.service_account_email)
+
+  - id: tpu_nodeset-128
+    source: community/modules/compute/schedmd-slurm-gcp-v6-nodeset-tpu
+    use: [network]
+    settings:
+#      accelerator_config:
+#        version: V6e
+#        topology: 8x16
+      node_type: v6e-128
+      preemptible: false
+      preserve_tpu: false
+      node_count_dynamic_max: 64
+      service_account_email: $(compute_sa.service_account_email)
+
+  - id: tpu_nodeset-256
+    source: community/modules/compute/schedmd-slurm-gcp-v6-nodeset-tpu
+    use: [network]
+    settings:
+#      accelerator_config:
+#        version: V6e
+#        topology: 16x16
+      node_type: v6e-256
+      preemptible: false
+      preserve_tpu: false
+      node_count_dynamic_max: 64
+      service_account_email: $(compute_sa.service_account_email)
+
+  - id: tpu_partition-1
+    source: community/modules/compute/schedmd-slurm-gcp-v6-partition
+    use: [tpu_nodeset-1]
+    settings:
+      partition_name: tpu1
+
+  - id: tpu_partition-4
+    source: community/modules/compute/schedmd-slurm-gcp-v6-partition
+    use: [tpu_nodeset-4]
+    settings:
+      partition_name: tpu4
+
+  - id: tpu_partition-8
+    source: community/modules/compute/schedmd-slurm-gcp-v6-partition
+    use: [tpu_nodeset-8]
+    settings:
+      partition_name: tpu8
+
+  - id: tpu_partition-16
+    source: community/modules/compute/schedmd-slurm-gcp-v6-partition
+    use: [tpu_nodeset-16]
+    settings:
+      partition_name: tpu16
+
+  - id: tpu_partition-32
+    source: community/modules/compute/schedmd-slurm-gcp-v6-partition
+    use: [tpu_nodeset-32]
+    settings:
+      partition_name: tpu32
+
+  - id: tpu_partition-64
+    source: community/modules/compute/schedmd-slurm-gcp-v6-partition
+    use: [tpu_nodeset-64]
+    settings:
+      partition_name: tpu64
+
+  - id: tpu_partition-128
+    source: community/modules/compute/schedmd-slurm-gcp-v6-partition
+    use: [tpu_nodeset-128]
+    settings:
+      partition_name: tpu128
+
+  - id: tpu_partition-256
+    source: community/modules/compute/schedmd-slurm-gcp-v6-partition
+    use: [tpu_nodeset-256]
+    settings:
+      partition_name: tpu256
+
+  - id: compute_nodeset
+    source: community/modules/compute/schedmd-slurm-gcp-v6-nodeset
+    use: [network]
+    settings:
+      name: ns2
+      node_count_dynamic_max: 10
+      bandwidth_tier: gvnic_enabled
+      allow_automatic_updates: false
+
+  - id: compute_partition
+    source: community/modules/compute/schedmd-slurm-gcp-v6-partition
+    use: [compute_nodeset]
+    settings:
+      partition_name: compute
+      is_default: true
+
+  - id: slurm_login
+    source: community/modules/scheduler/schedmd-slurm-gcp-v6-login
+    use: [network]
+    settings:
+      enable_login_public_ips: false
+      machine_type: n2-standard-2
+      service_account_email: $(login_sa.service_account_email)
+
+  - id: slurm_controller
+    source: community/modules/scheduler/schedmd-slurm-gcp-v6-controller
+    use:
+    - tpu_partition-1
+    - tpu_partition-4
+    - tpu_partition-8
+    - tpu_partition-16
+    - tpu_partition-32
+    - tpu_partition-64
+    - tpu_partition-128
+    - tpu_partition-256
+    - compute_partition
+    - slurm_login
+    - network
+    settings:
+      enable_controller_public_ips: false
+      machine_type: n2-standard-2
+      login_startup_script: $(script.startup_script)
+      service_account_email: $(controller_sa.service_account_email)
+      enable_debug_logging: true
+      extra_logging_flags:
+        trace_api: true
