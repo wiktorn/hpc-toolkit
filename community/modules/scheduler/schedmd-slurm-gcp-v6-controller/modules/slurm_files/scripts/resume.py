@@ -295,12 +295,12 @@ def group_nodes_bulk(nodes: List[str], resume_data: Optional[ResumeData], lkp: u
 
 
 def start_tpu(data):
-    tpu = data["tpu"]
+    tpu = data["tpu"]  # type: util.TPU
     node = data["node"]
     if len(node) == 1:
         node = node[0]
         log.debug(
-            f"Will create a TPU of type {tpu.node_type} tf_version {tpu.tf_version} in zone {tpu.zone} with name {node}"
+            f"Will create a TPU of type {tpu.node_type} runtime_version {tpu.runtime_version} in zone {tpu.zone} with name {node}"
         )
         tpunode = tpu.get_node(node)
         if tpunode is None:
@@ -316,7 +316,7 @@ def start_tpu(data):
                 )
     else:
         log.debug(
-            f"Will create a multi-vm TPU of type {tpu.node_type} tf_version {tpu.tf_version} in zone {tpu.zone} with name {node[0]}"
+            f"Will create a multi-vm TPU of type {tpu.node_type} runtime_version {tpu.runtime_version} in zone {tpu.zone} with name {node[0]}"
         )
         if not tpu.create_node(nodename=node):
             log.error("Error creating tpu node {node}")

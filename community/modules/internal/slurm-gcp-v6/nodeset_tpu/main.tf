@@ -20,7 +20,7 @@
 
 locals {
   node_conf_hw = {
-    Mem334CPU96 = {
+    V2V3 = {
       CPUs           = 96
       Boards         = 1
       Sockets        = 2
@@ -28,7 +28,7 @@ locals {
       ThreadsPerCore = 2
       RealMemory     = 307200
     }
-    Mem400CPU240 = {
+    V4 = {
       CPUs           = 240
       Boards         = 1
       Sockets        = 2
@@ -36,11 +36,39 @@ locals {
       ThreadsPerCore = 2
       RealMemory     = 400000
     }
+    #TODO - refactor
+    V5E = {
+      CPUs           = 224
+      Boards         = 1
+      Sockets        = 2
+      CoresPerSocket = 56
+      ThreadsPerCore = 2
+      RealMemory     = 384 * 1024
+    }
+    V5P = {
+      CPUs           = 208
+      Boards         = 1
+      Sockets        = 2
+      CoresPerSocket = 52
+      ThreadsPerCore = 2
+      RealMemory     = 448 * 1024
+    }
+    V6E = {
+      CPUs           = 180
+      Boards         = 1
+      Sockets        = 2
+      CoresPerSocket = 45
+      ThreadsPerCore = 2
+      RealMemory     = 708 * 1024
+    }
   }
   node_conf_mappings = {
-    "v2" = local.node_conf_hw.Mem334CPU96
-    "v3" = local.node_conf_hw.Mem334CPU96
-    "v4" = local.node_conf_hw.Mem400CPU240
+    "v2"  = local.node_conf_hw.V2V3
+    "v3"  = local.node_conf_hw.V2V3
+    "v4"  = local.node_conf_hw.V4
+    "v5e" = local.node_conf_hw.V5E
+    "v5p" = local.node_conf_hw.V5P
+    "v6e" = local.node_conf_hw.V6E
   }
   simple_nodes = ["v2-8", "v3-8", "v4-8"]
 }
@@ -58,7 +86,7 @@ locals {
     node_conf              = local.node_conf_mappings[local.tpu_fam]
     node_type              = var.node_type
     accelerator_config     = var.accelerator_config
-    tf_version             = var.tf_version
+    runtime_version        = var.runtime_version
     preemptible            = local.can_preempt ? var.preemptible : false
     reserved               = var.reserved
     node_count_dynamic_max = var.node_count_dynamic_max
@@ -68,7 +96,7 @@ locals {
     service_account        = var.service_account != null ? var.service_account : local.service_account
     preserve_tpu           = local.can_preempt ? var.preserve_tpu : false
     data_disks             = var.data_disks
-    docker_image           = var.docker_image != "" ? var.docker_image : "us-docker.pkg.dev/schedmd-slurm-public/tpu/slurm-gcp-6-8:tf-${var.tf_version}"
+    docker_image           = var.docker_image != "" ? var.docker_image : "us-docker.pkg.dev/schedmd-slurm-public/tpu/slurm-gcp-6-8"
     subnetwork             = local.snetwork
     network_storage        = var.network_storage
   }

@@ -56,9 +56,10 @@ variable "docker_image" {
   default     = ""
 }
 
-variable "tf_version" {
-  description = "Nodeset Tensorflow version, see https://cloud.google.com/tpu/docs/supported-tpu-configurations#tpu_vm for details."
+variable "runtime_version" {
+  description = "Nodeset runtinme version, see https://cloud.google.com/tpu/docs/runtimes#tpu_vm for details."
   type        = string
+  default     = "tpu-ubuntu2204-base"
 }
 
 variable "zone" {

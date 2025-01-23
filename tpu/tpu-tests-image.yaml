@@ -1,0 +1,76 @@
+# Copyright 2022 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+---
+
+blueprint_name: tpu-v6-image
+
+vars:
+  project_id: ## Set GCP Project ID Here ##
+  deployment_name: tpu-v6-image
+  region: us-central1
+  zone: us-central1-a
+  disk_size: 100
+  custom_image:
+    family: tpu-v6-image
+    project: $(vars.project_id)
+
+
+deployment_groups:
+- group: primary
+  modules:
+  - id: network
+    source: modules/network/vpc
+  - id: imagebuilder_sa
+    source: community/modules/project/service-account
+    settings:
+      name: builder-10-base
+      deployment_name: "hci" # use short name for service account
+      display_name: builder-10-base
+      project_roles:
+      - compute.instanceAdmin.v1
+      - iam.serviceAccountUser
+      - logging.logWriter
+      - monitoring.metricWriter
+      - storage.objectViewer
+
+  - id: scripts_for_image
+    source: modules/scripts/startup-script
+    settings:
+      runners:
+      - type: shell
+        destination: pip.sh
+        content: |
+          #!/bin/sh
+          pip install google-cloud-tpu==1.21.0
+
+- group: packer
+  modules:
+  - id: custom-image
+    source: modules/packer/custom-image
+    kind: packer
+    use:
+    - network
+    - scripts_for_image
+    settings:
+      source_image_project_id: [schedmd-slurm-public]
+      # see latest in https://github.com/GoogleCloudPlatform/slurm-gcp/blob/master/docs/images.md#published-image-family
+      source_image_family: slurm-gcp-6-8-hpc-rocky-linux-8
+      # You can find size of source image by using following command
+      # gcloud compute images describe-from-family <source_image_family> --project schedmd-slurm-public
+      disk_size: $(vars.disk_size)
+      image_family: $(vars.custom_image.family)
+      state_timeout: 15m
+      service_account_email: $(imagebuilder_sa.service_account_email)
+      service_account_scopes: ["https://www.googleapis.com/auth/cloud-platform"]

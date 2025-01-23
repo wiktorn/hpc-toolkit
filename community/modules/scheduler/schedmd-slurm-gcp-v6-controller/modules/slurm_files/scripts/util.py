@@ -65,6 +65,7 @@ except ImportError: # TODO: remove once CentOS 7 is deprecated or dependency is 
     can_tpu = False
 
 import google.api_core.exceptions as gExceptions  # noqa: E402
+from google.protobuf import json_format
 
 from requests import get as get_url  # noqa: E402
 from requests.exceptions import RequestException  # noqa: E402
@@ -611,9 +612,12 @@ def log_api_request(request):
         return
     # output the whole request object as pretty yaml
     # the body is nested json, so load it as well
-    rep = json.loads(request.to_json())
-    if rep.get("body", None) is not None:
-        rep["body"] = json.loads(rep["body"])
+    if hasattr(request, 'to_json'):
+        rep = json.loads(request.to_json())
+        if rep.get("body", None) is not None:
+            rep["body"] = json.loads(rep["body"])
+    else:
+        rep = json_format.MessageToJson(request)
     pretty_req = yaml.safe_dump(rep).rstrip()
     # label log message with the calling function
     log.debug(f"{inspect.stack()[1].function}:\n{pretty_req}")
@@ -1262,8 +1266,8 @@ class TPU:
         return self._nodeset.node_type
 
     @property
-    def tf_version(self):
-        return self._nodeset.tf_version
+    def runtime_version(self):
+        return self._nodeset.runtime_version
 
     @property
     def enable_public_ip(self):
@@ -1293,15 +1297,6 @@ class TPU:
                 name=f"{self._parent}/acceleratorTypes/{self.node_type}"
             )
             return self._client.get_accelerator_type(request=request) is not None
-        except Exception:
-            return False
-
-    def check_tf_version(self):
-        try:
-            request = tpu.GetRuntimeVersionRequest(
-                name=f"{self._parent}/runtimeVersions/{self.tf_version}"
-            )
-            return self._client.get_runtime_version(request=request) is not None
         except Exception:
             return False
 
@@ -1374,7 +1369,7 @@ class TPU:
 
         node = tpu.Node()
         node.accelerator_config = self.ac
-        node.runtime_version = f"tpu-vm-tf-{self.tf_version}"
+        node.runtime_version = self.runtime_version
         startup_script = """
         #!/bin/bash
         echo "startup script not found > /var/log/startup_error.log"
@@ -1414,6 +1409,7 @@ class TPU:
             node.data_disks = self.data_disks
 
         request = tpu.CreateNodeRequest(parent=self._parent, node=node, node_id=node_id)
+
         resp = self._client.create_node(request=request).result()
         if not self.__check_resp(resp, "create"):
             return False
