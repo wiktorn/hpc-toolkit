@@ -136,7 +136,16 @@ EOF
 	# 	TPU_FLAGS="--privileged"
 	# fi
 
-	docker run -d $CGROUP_FLAGS $TPU_FLAGS --net=host --name=slurmd --hostname=$real_name --entrypoint=/usr/bin/systemd --restart unless-stopped $docker_image
+  # pass the hostname into slurmd container, so the work distribution frameworks will be able to correctly
+  # identify local address and hostname and coordinate the work
+	docker run -d $CGROUP_FLAGS $TPU_FLAGS --net=host --name=slurmd --hostname="$(hostname)" --entrypoint=/usr/bin/systemd --restart unless-stopped $docker_image
+	# wait until file is there
+	local slurmd_config_path="/etc/default/slurmd"
+	until docker exec slurmd test -f $slurmd_config_path ; do
+	  sleep 1
+  done
+  # explicitly set node name as defined by $real_name, so slurmd recognizes, which Slurm node it is
+  docker exec slurmd /bin/bash -c "sed -i -e \"s/SLURMD_OPTIONS='/SLURMD_OPTIONS='-N \\\"${real_name}\\\" /\" $slurmd_config_path"
 	exit 0
 }
 
