@@ -12,6 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
+# TODO:
+# - test with a smaller model on tpu128 or smaller
+# - modify Dockerfile / build a new image, so OpenMPI works from within the image
+
 ---
 
 blueprint_name: tpu-v6
@@ -24,17 +29,123 @@ vars:
   instance_image:
     project: $(vars.project_id)
     family: tpu-v6-image
+  allow_automatic_updates: true
   disk_size_gb: 100
   instance_image_custom: true
   resume_timeout: 600
-  docker_image: us-docker.pkg.dev/wns-gsk-hpc/regus/slurm-tpu:2.15.0
+  # docker_image: us-docker.pkg.dev/wns-gsk-hpc/regus/slurm-tpu:2.15.0
+  docker_image: us-docker.pkg.dev/wns-gsk-hpc/regus/slurm-tpu:6.8.6
   runtime_version: v2-alpha-tpuv6e # 2.18.0-pjrt-v5e-and-v6 # 2.18.0-pjrt-v5e-and-v6 # 2.14.0 #tf_version
 
 deployment_groups:
 - group: primary
+  terraform_providers:
+    # override default requirements, that pin to specific version using ~>
+    google:
+      source: "hashicorp/google"
+      version: ">= 6.0.0, != 6.13.0, < 7.0.0"
+    google-beta:
+      source: "hashicorp/google-beta"
+      version: ">= 6.0.0, != 6.13.0, < 7.0.0"
+
   modules:
   - id: network
     source: modules/network/vpc
+    settings:
+      subnetworks:
+      - subnet_name: $(vars.deployment_name)-primary
+        subnet_region: $(vars.region)
+        subnet_ip: 10.0.0.0/20
+        subnet_private_access: true
+
+      - subnet_name: $(vars.deployment_name)-tpu
+        subnet_region: $(vars.region)
+        subnet_ip: 10.1.0.0/20
+        subnet_private_access: true
+
+  - id: dns
+    source: github.com/GoogleCloudPlatform/cloud-foundation-fabric.git//modules/dns?ref=v38.0.0
+    settings:
+      name: "tpu-zone"
+      zone_config:
+        domain: "tpu.$(vars.project_id).internal."
+        private:
+          client_networks:
+          - $(network.network_self_link)
+      #iam:
+      #  "roles/dns.admin":
+      #    - $(controller_sa.service_account_iam_email)
+
+  - id: reverse_dns
+    source: github.com/GoogleCloudPlatform/cloud-foundation-fabric.git//modules/dns?ref=v38.0.0
+    settings:
+      name: "reverse-tpu-zone"
+      zone_config:
+        domain: "1.0.10.in-addr.arpa."
+        private:
+          client_networks:
+          - $(network.network_self_link)
+      #iam:
+      #  "roles/dns.admin":
+      #  - $(controller_sa.service_account_iam_email)
+
+  - id: controller-setup
+    source: modules/scripts/startup-script
+    settings:
+      runners:
+      - type: data
+        destination: /usr/local/bin/node_recovery.sh
+        content: |
+          #!/bin/bash
+
+          sinfo --Format=partition:20,nodes:6,nodelist:40,statecomplete:80
+          sinfo --Format=partition:20,nodelist:440,statecomplete:80 | \
+                  grep 'idle+cloud+powered_down+not_responding' | \
+                  awk -F ' ' '{print "scontrol update nodename=" $2 " state=drain reason=fixing"}' | \
+                  bash -x
+          sleep 30
+          sinfo --Format=partition:20,nodes:6,nodelist:40,statecomplete:80
+          sinfo --Format=partition:20,nodelist:440,statecomplete:80 | \
+                  grep 'idle+cloud+drain+powered_down+not_responding' | \
+                  awk -F ' ' '{print "scontrol update nodename=" $2 " state=undrain"}' | \
+                  bash -x
+          sinfo --Format=partition:20,nodes:6,nodelist:40,statecomplete:80
+
+      - type: data
+        destination: /etc/systemd/system/node_recovery.service
+        content: |
+          [Unit]
+          Description=Service to recover Slurm nodes periodically
+          Wants=node_recovery.timer
+
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/local/bin/node_recovery.sh
+
+          [Install]
+          WantedBy=multi-user.target
+
+      - type: data
+        destination: /etc/systemd/system/node_recovery.timer
+        content: |
+          [Unit]
+          Description=Run Node Recovery Script Every 10 Minutes
+          Requires=node_recovery.service
+
+          [Timer]
+          OnUnitInactiveSec=10minutes
+          Unit=node_recovery.service
+
+          [Install]
+          WantedBy=timers.target
+
+      - type: shell
+        destination: start_recovery_timer.sh
+        content: |
+          #!/bin/bash
+          chmod 0755 /usr/local/bin/node_recovery.sh
+          systemctl daemon-reload
+          systemctl enable --now node_recovery.timer
 
   - id: script
     source: modules/scripts/startup-script
@@ -53,7 +164,7 @@ deployment_groups:
           #!/bin/bash
           set -o xtrace
           # gsutil -u $(vars.project_id) -m cp 'gs://allennlp-tensorflow-datasets/c4/en/3.0.1/*' $(bucket_dataset.gcs_bucket_path)/c4/en/3.0.1
-          gcloud storage rsync --billing-project $(vars.project_id) 'gs://allennlp-tensorflow-datasets/c4/en/3.0.1' $(bucket_dataset.gcs_bucket_path)/c4/en/3.0.1
+          # gcloud storage rsync --billing-project $(vars.project_id) 'gs://allennlp-tensorflow-datasets/c4/en/3.0.1' $(bucket_dataset.gcs_bucket_path)/c4/en/3.0.1
 
       - type: data
         destination: /opt/apps/scripts/tpu-test/run_maxtext.sh
@@ -65,28 +176,464 @@ deployment_groups:
           # ATTENTION: (i.e. dot_product, flash)
           # STEPS: steps to run (i.e. 100, 1000)
 
-          #SBATCH --nodes=1
-          #SBATCH --ntasks-per-node=1
-          #SBATCH --mem=50000
-          #SBATCH --partition=tpu
+          #SBATCH --mem=500000
+          #S BATCH --nodes=1
+          #S BATCH --ntasks-per-node=1
+          #S BATCH --partition=tpu
 
           set -e -o pipefail
 
           # Start virtual environment.
-          virtualenv venv
-          source venv/local/bin/activate
-
-          # Clone maxtext repository, lock version of maxtext and
-          # install dependencies.
-          git clone https://github.com/google/maxtext
-          cd maxtext/
-          # git reset --hard 39a3f19e832016741be803ef5253333e2f434cb8 - doesn't work due to broken dependencies
-          bash setup.sh MODE=stable
+          if [ ! -d venv ] ; then
+            python3 -m venv venv
+            rm -rf maxtext
+            if [ ! -d maxtext ] ; then
+              git clone https://github.com/google/maxtext
+            fi
+            source venv/bin/activate
+            pip3 install -U pip3
+            pip3 install --no-cache-dir -U -r maxtext/requirements.txt
+            pip3 install --pre -U jax -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html
+            pip3 install --pre -U jaxlib -f https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html
+            pip3 install -U --pre libtpu -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
+            pip3 install tbp-nightly --upgrade
+          else
+            source venv/bin/activate
+          fi
+          cd maxtext
 
           # Run maxtext benchmark test.
           # (i.e.) python3 MaxText/train.py MaxText/configs/base.yml run_name=1xv4-128 base_output_directory=${PWD}/output/ dataset_path=gs://dataset_tpu/dataset async_checkpointing=False attention=dot_product steps=100
           # python3 MaxText/train.py MaxText/configs/base.yml run_name=<RUN_NAME> base_output_directory=${PWD}/output/ dataset_path=$(bucket_dataset.gcs_bucket_path)/ async_checkpointing=False attention=flash steps=100
-          bash MaxText/configs/v5e/16b.sh RUN_NAME="run_\$(date +%Y%m%d%H%M%S)" OUTPUT_PATH="$(bucket_output.gcs_bucket_path)" DATASET_PATH="$(bucket_dataset.gcs_bucket_path)/c4/en/3.0.1"
+          srun bash ../run_llama31-70b-train.sh RUN_NAME="run_\$(date +%Y%m%d%H%M%S)" OUTPUT_PATH="$(bucket_output.gcs_bucket_path)" DATASET_PATH="$(bucket_dataset.gcs_bucket_path)/c4/en/3.0.1"
+
+      - type: data
+        destination: /opt/apps/scripts/tpu-test/run_llama31-70b-train.sh
+        content: |
+          #!/bin/bash
+          export EXECUTABLE="train.py"
+
+          # Set environment variables
+          for ARGUMENT in "$@"; do
+            IFS='=' read -r KEY VALUE <<< "$ARGUMENT"
+            export "$KEY"="$VALUE"
+          done
+
+          if [ -n "$RUN_NAME" ];
+          then
+            export M_RUN_NAME=$RUN_NAME
+          fi
+
+          # tokenizer_path=assets/tokenizer.llama2
+          # original
+          #export LIBTPU_INIT_ARGS="--xla_tpu_enable_data_parallel_all_reduce_opt=true --xla_tpu_data_parallel_opt_different_sized_ops=true --xla_tpu_enable_async_collective_fusion=true --xla_tpu_enable_async_collective_fusion_fuse_all_gather=true --xla_tpu_enable_async_collective_fusion_multiple_steps=true --xla_tpu_overlap_compute_collective_tc=true --xla_enable_async_all_gather=true"
+          #python3 MaxText/$EXECUTABLE MaxText/configs/base.yml model_name=llama3-70b \
+          #  steps=15 per_device_batch_size=2 enable_checkpointing=false\
+          #  remat_policy=full global_parameter_scale=16\
+          #  max_target_length=2048 base_output_directory=$OUTPUT_PATH\
+          #  dataset_path=$DATASET_PATH use_iota_embed=true reuse_example_batch=1\
+          #  dataset_type=synthetic attention='flash' gcs_metrics=true
+
+          # b/372926224#comment85
+          export LIBTPU_INIT_ARGS="--xla_tpu_scoped_vmem_limit_kib=98304 --xla_tpu_use_minor_sharding_for_major_trivial_input=true --xla_tpu_relayout_group_size_threshold_for_reduce_scatter=1 --xla_tpu_assign_all_reduce_scatter_layout=true  --xla_tpu_enable_data_parallel_all_reduce_opt=true --xla_tpu_data_parallel_opt_different_sized_ops=true  --xla_tpu_enable_all_experimental_scheduler_features=true  --xla_tpu_enable_scheduler_memory_pressure_tracking=true  --xla_tpu_host_transfer_overlap_limit=24 --xla_tpu_aggressive_opt_barrier_removal=ENABLED  --xla_lhs_prioritize_async_depth_over_stall=ENABLED --xla_tpu_enable_ag_backward_pipelining=true  --xla_should_allow_loop_variant_parameter_in_chain=ENABLED --xla_should_add_loop_invariant_op_in_chain=ENABLED --xla_max_concurrent_host_send_recv=100 --xla_tpu_scheduler_percent_shared_memory_limit=100 --xla_latency_hiding_scheduler_rerun=2"
+          # options to change above
+          #     "--xla_tpu_enable_sparse_core_collective_offload_all_reduce=true"
+          #    "--xla_tpu_enable_all_reduce_offload_tracing=true"
+          #    "--deepsea_chip_config_name=megachip_tccontrol"
+          # based on: https://b.corp.google.com/issues/372926224#comment93
+            # for TPU256 custom_mesh=hybrid_ring_32x8
+          # for TPU128 custom_mesh=hybrid_ring_16x8 - this is not working - not implemented
+          # b/388572320
+          # idea to add: megablox=True quantization=int8
+          # per_device_batch_size - needs to give integer result after multiplied by number of devices?
+          # .0078125
+          # batch size 0.5 -> jaxlib.xla_extension.XlaRuntimeError: INTERNAL: RET_CHECK failure (platforms/xla/service/ba16c7433/target.cc:3039) TransferSizeUtil::HasSparseCoreLayout(*topology_, leaf_shape)
+          # Per train step:
+          # Total TFLOPs: 92361.59
+          # split as 29.13% learnable weight flops and 70.87% attention flops
+          # use dcn_data_parallelism=2 -> when multislice?
+          # sharding_strategy: "experimental" ?
+          export LIBTPU_INIT_ARGS="--xla_tpu_scoped_vmem_limit_kib=98304 --xla_tpu_use_minor_sharding_for_major_trivial_input=true --xla_tpu_relayout_group_size_threshold_for_reduce_scatter=1 --xla_tpu_assign_all_reduce_scatter_layout=true  --xla_tpu_enable_data_parallel_all_reduce_opt=true --xla_tpu_data_parallel_opt_different_sized_ops=true  --xla_tpu_enable_all_experimental_scheduler_features=true  --xla_tpu_enable_scheduler_memory_pressure_tracking=true  --xla_tpu_host_transfer_overlap_limit=24 --xla_tpu_aggressive_opt_barrier_removal=ENABLED  --xla_lhs_prioritize_async_depth_over_stall=ENABLED --xla_tpu_enable_ag_backward_pipelining=true  --xla_should_allow_loop_variant_parameter_in_chain=ENABLED --xla_should_add_loop_invariant_op_in_chain=ENABLED --xla_max_concurrent_host_send_recv=100 --xla_tpu_scheduler_percent_shared_memory_limit=100 --xla_latency_hiding_scheduler_rerun=2 --xla_tpu_enable_sparse_core_collective_offload_all_reduce=true --xla_tpu_enable_all_reduce_offload_tracing=true"
+          #python3 MaxText/$EXECUTABLE MaxText/configs/base.yml model_name=llama3.1-70b \
+          #  steps=15 per_device_batch_size=0.125 ici_fsdp_parallelism=-1 ici_sequence_parallelism=8 \
+          #  remat_policy=custom decoder_layer_input=offload out_proj=offload query_proj=offload key_proj=offload \
+          #  value_proj=offload max_target_length=129024 attention=flash use_iota_embed=true \
+          #  sa_block_q=2048 sa_block_kv=2048 sa_block_kv_compute=2048 sa_block_q_dkv=2048 \
+          #  sa_block_kv_dkv=2048 sa_block_kv_dkv_compute=2048 sa_block_q_dq=2048 sa_block_kv_dq=2048 \
+          #  sa_use_fused_bwd_kernel=true allow_split_physical_axes=true custom_mesh=hybrid_ring_32x8 \
+          #  enable_checkpointing=false \
+          #  dcn_data_parallelism=2 \
+          #  base_output_directory=$OUTPUT_PATH\
+          #  dataset_path=$DATASET_PATH reuse_example_batch=1\
+          #  dataset_type=synthetic gcs_metrics=true
+
+          # TODO:
+          # - bigger batch - 2?
+          # sa_block_q=1024 sa_block_q_dkv=2048 sa_block_q_dq=2048
+          #
+          export LIBTPU_INIT_ARGS="--xla_tpu_scoped_vmem_limit_kib=98304 --xla_tpu_use_minor_sharding_for_major_trivial_input=true --xla_tpu_relayout_group_size_threshold_for_reduce_scatter=1 --xla_tpu_assign_all_reduce_scatter_layout=true  --xla_tpu_enable_data_parallel_all_reduce_opt=true --xla_tpu_data_parallel_opt_different_sized_ops=true  --xla_tpu_enable_all_experimental_scheduler_features=true  --xla_tpu_enable_scheduler_memory_pressure_tracking=true  --xla_tpu_host_transfer_overlap_limit=24 --xla_tpu_aggressive_opt_barrier_removal=ENABLED  --xla_lhs_prioritize_async_depth_over_stall=ENABLED --xla_tpu_enable_ag_backward_pipelining=true  --xla_should_allow_loop_variant_parameter_in_chain=ENABLED --xla_should_add_loop_invariant_op_in_chain=ENABLED --xla_max_concurrent_host_send_recv=100 --xla_tpu_scheduler_percent_shared_memory_limit=100 --xla_latency_hiding_scheduler_rerun=2 --xla_tpu_enable_sparse_core_collective_offload_all_reduce=false --xla_tpu_enable_all_reduce_offload_tracing=true"
+          python3 MaxText/$EXECUTABLE MaxText/configs/base.yml model_name=llama3.1-8b \
+            steps=15 per_device_batch_size=0.5 ici_fsdp_parallelism=-1 ici_sequence_parallelism=8 \
+            remat_policy=custom decoder_layer_input=offload out_proj=offload query_proj=offload key_proj=offload \
+            value_proj=offload max_target_length=129024 attention=flash use_iota_embed=true \
+            enable_checkpointing=false \
+            base_output_directory=$OUTPUT_PATH\
+            dataset_path=$DATASET_PATH reuse_example_batch=1\
+            dataset_type=synthetic gcs_metrics=true
+
+
+      - type: data
+        destination: /opt/apps/scripts/tpu-test/run_llama31-8b.sh
+        content: |
+          #!/bin/bash
+          # Update the following parameters in the python3 command in this script.
+          # RUN_NAME: (required, see https://github.com/google/maxtext?tab=readme-ov-file#overview)
+          # STORAGE_BUCKET: GCS bucket where dataset is stored. (i.e.: gs://dataset-tpu/dataset)
+          # ATTENTION: (i.e. dot_product, flash)
+          # STEPS: steps to run (i.e. 100, 1000)
+
+          #SBATCH --mem=550000
+          #S BATCH --nodes=1
+          #S BATCH --ntasks-per-node=1
+          #S BATCH --partition=tpu
+
+          set -e -o pipefail
+
+          # Start virtual environment.
+          if [ ! -d venv ] ; then
+            apt-get update  && apt-get install -y python3.10-venv
+            rm -rf maxtext
+            if [ ! -d maxtext ] ; then
+              git clone https://github.com/google/maxtext
+            fi
+            python3 -m venv venv
+            source venv/bin/activate
+            pip3 install -U pip
+            pip3 install --no-cache-dir -U -r maxtext/requirements.txt
+            pip3 install --pre -U jax -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html
+            pip3 install --pre -U jaxlib -f https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html
+            pip3 install -U --pre libtpu -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
+            pip3 install tbp-nightly --upgrade
+            # maxtext/setup.sh MODE=stable
+            # (cd maxtext ; bash setup.sh MODE=stable )
+          else
+            source venv/bin/activate
+            if [ ! -d maxtext ] ; then
+              git clone https://github.com/google/maxtext
+            fi
+          fi
+          cd maxtext
+
+          # Run maxtext benchmark test.
+          # (i.e.) python3 MaxText/train.py MaxText/configs/base.yml run_name=1xv4-128 base_output_directory=${PWD}/output/ dataset_path=gs://dataset_tpu/dataset async_checkpointing=False attention=dot_product steps=100
+          # python3 MaxText/train.py MaxText/configs/base.yml run_name=<RUN_NAME> base_output_directory=${PWD}/output/ dataset_path=gs://wns-gsk-hpc-dataset/ async_checkpointing=False attention=flash steps=100
+          srun bash ../run_llama31-8b-train.sh RUN_NAME="run_\$(date +%Y%m%d%H%M%S)" OUTPUT_PATH="gs://wns-gsk-hpc-output" DATASET_PATH="gs://wns-gsk-hpc-dataset/c4/en/3.0.1"
+
+
+      - type: data
+        destination: /opt/apps/scripts/tpu-test/run_llama31-8b-train.sh
+        content: |
+          #!/bin/bash
+          export EXECUTABLE="train.py"
+
+          # Set environment variables
+          for ARGUMENT in "$@"; do
+            IFS='=' read -r KEY VALUE <<< "$ARGUMENT"
+            export "$KEY"="$VALUE"
+          done
+
+          if [ -n "$RUN_NAME" ];
+          then
+            export M_RUN_NAME=$RUN_NAME
+          fi
+
+          # tokenizer_path=assets/tokenizer.llama2
+          # original
+          #export LIBTPU_INIT_ARGS="--xla_tpu_enable_data_parallel_all_reduce_opt=true --xla_tpu_data_parallel_opt_different_sized_ops=true --xla_tpu_enable_async_collective_fusion=true --xla_tpu_enable_async_collective_fusion_fuse_all_gather=true --xla_tpu_enable_async_collective_fusion_multiple_steps=true --xla_tpu_overlap_compute_collective_tc=true --xla_enable_async_all_gather=true"
+          #python3 MaxText/$EXECUTABLE MaxText/configs/base.yml model_name=llama3-70b \
+          #  steps=15 per_device_batch_size=2 enable_checkpointing=false\
+          #  remat_policy=full global_parameter_scale=16\
+          #  max_target_length=2048 base_output_directory=$OUTPUT_PATH\
+          #  dataset_path=$DATASET_PATH use_iota_embed=true reuse_example_batch=1\
+          #  dataset_type=synthetic attention='flash' gcs_metrics=true
+
+          # based on 70B
+          # first working version
+          # slurm-78.out
+          # gs://wns-gsk-hpc-output/run_20250226135651/metrics/
+          # completed step: 14, seconds: 25.064, TFLOP/s/device: 319.123, Tokens/s/device: 1286.966, total_weights: 4128768, loss: 11.468
+          export LIBTPU_INIT_ARGS="--xla_tpu_scoped_vmem_limit_kib=98304 --xla_tpu_use_minor_sharding_for_major_trivial_input=true --xla_tpu_relayout_group_size_threshold_for_reduce_scatter=1 --xla_tpu_assign_all_reduce_scatter_layout=true  --xla_tpu_enable_data_parallel_all_reduce_opt=true --xla_tpu_data_parallel_opt_different_sized_ops=true  --xla_tpu_enable_all_experimental_scheduler_features=true  --xla_tpu_enable_scheduler_memory_pressure_tracking=true  --xla_tpu_host_transfer_overlap_limit=24 --xla_tpu_aggressive_opt_barrier_removal=ENABLED  --xla_lhs_prioritize_async_depth_over_stall=ENABLED --xla_tpu_enable_ag_backward_pipelining=true  --xla_should_allow_loop_variant_parameter_in_chain=ENABLED --xla_should_add_loop_invariant_op_in_chain=ENABLED --xla_max_concurrent_host_send_recv=100 --xla_tpu_scheduler_percent_shared_memory_limit=100 --xla_latency_hiding_scheduler_rerun=2 --xla_tpu_enable_sparse_core_collective_offload_all_reduce=false --xla_tpu_enable_all_reduce_offload_tracing=true"
+          python3 MaxText/$EXECUTABLE MaxText/configs/base.yml model_name=llama3.1-8b \
+            steps=15 per_device_batch_size=0.25 ici_fsdp_parallelism=-1 ici_sequence_parallelism=8 \
+            remat_policy=custom decoder_layer_input=offload out_proj=offload query_proj=offload key_proj=offload \
+            value_proj=offload max_target_length=129024 attention=flash use_iota_embed=true \
+            sa_block_q=2048 sa_block_kv=2048 sa_block_kv_compute=2048 sa_block_q_dkv=2048 \
+            sa_block_kv_dkv=2048 sa_block_kv_dkv_compute=2048 sa_block_q_dq=2048 sa_block_kv_dq=2048 \
+            sa_use_fused_bwd_kernel=true allow_split_physical_axes=true \
+            enable_checkpointing=false \
+            base_output_directory=$OUTPUT_PATH\
+            dataset_path=$DATASET_PATH reuse_example_batch=1\
+            dataset_type=synthetic gcs_metrics=true
+          # slurm-79.out
+          # gs://wns-gsk-hpc-output/run_20250226142321/metrics/
+          # completed step: 14, seconds: 48.533, TFLOP/s/device: 164.801, Tokens/s/device: 664.614, total_weights: 4128768, loss: 11.468
+          python3 MaxText/$EXECUTABLE MaxText/configs/base.yml model_name=llama3.1-8b \
+            steps=15 per_device_batch_size=0.25 ici_fsdp_parallelism=-1 ici_sequence_parallelism=8 \
+            remat_policy=custom decoder_layer_input=offload out_proj=offload query_proj=offload key_proj=offload \
+            value_proj=offload max_target_length=129024 attention=flash use_iota_embed=true \
+            enable_checkpointing=false \
+            base_output_directory=$OUTPUT_PATH\
+            dataset_path=$DATASET_PATH reuse_example_batch=1\
+            dataset_type=synthetic gcs_metrics=true
+
+          # completed step: 14, seconds: 98.542, TFLOP/s/device: 162.334, Tokens/s/device: 654.666, total_weights: 8257536, loss: 11.941
+          export LIBTPU_INIT_ARGS="--xla_tpu_enable_data_parallel_all_reduce_opt=true --xla_tpu_data_parallel_opt_different_sized_ops=true --xla_tpu_enable_async_collective_fusion=true --xla_tpu_enable_async_collective_fusion_fuse_all_gather=true --xla_tpu_enable_async_collective_fusion_multiple_steps=true --xla_tpu_overlap_compute_collective_tc=true --xla_enable_async_all_gather=true"
+          python3 MaxText/$EXECUTABLE MaxText/configs/base.yml model_name=llama3.1-8b \
+            steps=15 per_device_batch_size=0.5 ici_fsdp_parallelism=-1 ici_sequence_parallelism=8 \
+            remat_policy=custom decoder_layer_input=offload out_proj=offload query_proj=offload key_proj=offload \
+            value_proj=offload max_target_length=129024 attention=flash use_iota_embed=true \
+            enable_checkpointing=false \
+            base_output_directory=$OUTPUT_PATH\
+            dataset_path=$DATASET_PATH reuse_example_batch=1\
+            dataset_type=synthetic gcs_metrics=true
+          # testing using nightly build of JAX / TPU and company
+
+      - type: data
+        destination: /opt/apps/scripts/tpu-test/debug.sh
+        content: |
+          # python3 -u -c 'import jax; jax.distributed.initialize(cluster_detection_method="slurm"); print(jax.devices()); print(f"JAX Devices: {len(jax.devices())}")'
+          python3 -c 'import jax; print(jax.devices()); print(f"JAX Devices: {len(jax.devices())}")'
+
+      - type: data
+        destination: /opt/apps/scripts/tpu-test/run_debug.sh
+        content: |
+          #!/bin/bash
+          # Update the following parameters in the python3 command in this script.
+          # RUN_NAME: (required, see https://github.com/google/maxtext?tab=readme-ov-file#overview)
+          # STORAGE_BUCKET: GCS bucket where dataset is stored. (i.e.: gs://dataset-tpu/dataset)
+          # ATTENTION: (i.e. dot_product, flash)
+          # STEPS: steps to run (i.e. 100, 1000)
+
+          #S BATCH --nodes=1
+          #S BATCH --ntasks-per-node=1
+          #S BATCH --mem=50000
+          #S BATCH --partition=tpu
+
+          set -e -o pipefail
+
+          # Start virtual environment.
+          if [ ! -d venv ] ; then
+            apt-get update && apt-get install -y python3.10-venv
+            python3 -m venv venv
+            source venv/bin/activate
+            # Clone maxtext repository, lock version of maxtext and
+            # install dependencies.
+            rm -rf maxtext
+            if [ ! -d maxtext ] ; then
+              git clone https://github.com/google/maxtext
+            fi
+            cd maxtext/
+            bash setup.sh MODE=stable
+          else
+            source venv/bin/activate
+            if [ ! -d maxtext ] ; then
+              git clone https://github.com/google/maxtext
+              cd maxtext/
+              bash setup.sh MODE=stable
+            else
+              cd maxtext/
+            fi
+          fi
+
+          # Run maxtext benchmark test.
+          # (i.e.) python3 MaxText/train.py MaxText/configs/base.yml run_name=1xv4-128 base_output_directory=${PWD}/output/ dataset_path=gs://dataset_tpu/dataset async_checkpointing=False attention=dot_product steps=100
+          # python3 MaxText/train.py MaxText/configs/base.yml run_name=<RUN_NAME> base_output_directory=${PWD}/output/ dataset_path=$(bucket_dataset.gcs_bucket_path)/ async_checkpointing=False attention=flash steps=100
+          srun bash ../run_debug.sh
+
+  # Roberts hello-world
+
+      - type: data
+        destination: /opt/apps/scripts/robert-tpu-test/run.py
+        content: |
+          from datasets import load_dataset
+          from transformers import (
+              AutoConfig,
+              AutoModelForCausalLM,
+              AutoTokenizer,
+              DataCollatorForLanguageModeling,
+              HfArgumentParser,
+              Trainer,
+              TrainingArguments,
+          )
+
+
+          def main():
+              """Run LLM finetuning"""
+
+              # model_name = "meta-llama/Llama-3.1-70B-Instruct"
+              model_name = "meta-llama/Llama-3.1-8B-Instruct"
+
+              parser = HfArgumentParser(TrainingArguments)
+              (training_args,) = parser.parse_args_into_dataclasses()
+
+              # Prepare dataset
+              tokenizer = AutoTokenizer.from_pretrained(model_name)
+              tokenizer.pad_token = tokenizer.eos_token
+              dataset = load_dataset("databricks/databricks-dolly-15k")
+              dataset = dataset["train"]
+              column_names = dataset.column_names
+
+              def format_chat(item):
+                  messages = [
+                      {"role": "system", "content": ""},
+                      {"role": "user", "content": item["context"] + item["instruction"]},
+                      {"role": "assistant", "content": item["response"]},
+                  ]
+                  item = tokenizer.apply_chat_template(
+                      messages,
+                      tokenize=False,
+                      add_generation_prompt=False,
+                  )
+                  item = tokenizer(item)
+                  return item
+
+              dataset = dataset.map(format_chat, remove_columns=column_names)
+
+              # Do training
+              config = AutoConfig.from_pretrained(model_name)
+              model = AutoModelForCausalLM.from_pretrained(model_name, config=config)
+              trainer = Trainer(
+                  model=model,
+                  args=training_args,
+                  train_dataset=dataset,
+                  eval_dataset=None,
+                  processing_class=tokenizer,
+                  data_collator=DataCollatorForLanguageModeling(tokenizer, mlm=False),
+                  compute_metrics=None,
+                  preprocess_logits_for_metrics=None,
+              )
+              trainer.train()
+
+
+          if __name__ == "__main__":
+              main()
+
+      - type: data
+        destination: /opt/apps/scripts/robert-tpu-test/submit.sh
+        content: |
+          #!/bin/bash
+
+          #SBATCH --job-name=llm-finetuning
+          #SBATCH --time=1-00:00:00
+          #SBATCH --propagate=ALL
+          #SBATCH --mem=650G
+          #S BATCH --partition=a3
+          #S BATCH --ntasks=2
+          #S BATCH --nodes=2
+          #S BATCH --cpus-per-task=48
+          #S BATCH --mem=1800G
+          #S BATCH --gpus-per-task=8
+
+          NODES=( \$( scontrol show hostnames ${SLURM_JOB_NODELIST} ) )
+          NODES_ARRAY=(${NODES})
+          HEAD_NODE=${NODES_ARRAY[0]}
+          HEAD_NODE_IPS=\$(srun --nodes=1 --ntasks=1 -w "${HEAD_NODE}" hostname --ip-address)
+          HEAD_NODE_IPS_ARRAY=(${HEAD_NODE_IPS})
+          HEAD_NODE_IP=${HEAD_NODE_IPS_ARRAY[0]}
+
+          echo "SLURM_JOB_NODELIST=${SLURM_JOB_NODELIST}"
+          echo "NODES=${NODES}"
+          echo "NODES_ARRAY=${NODES_ARRAY}"
+          echo "HEAD_NODE=${HEAD_NODE}"
+          echo "HEAD_NODE_IPS=${HEAD_NODE_IPS}"
+          echo "HEAD_NODE_IPS_ARRAY=${HEAD_NODE_IPS_ARRAY}"
+          echo "HEAD_NODE_IP=${HEAD_NODE_IP}"
+
+          RUN_ID="\$(date +%s)"
+
+          SCRATCH_PREFIX="${HOME}/scratch"
+
+          OUTPUT_PATH="${SCRATCH_PREFIX}/finetuning/output/llama-3-1/${RUN_ID}"
+          mkdir -p "${OUTPUT_PATH}"
+
+          # export HF_HOME=${SCRATCH_PREFIX}/.cache/huggingface
+          export HF_HUB_DISABLE_PROGRESS_BARS=1
+          export TOKENIZERS_PARALLELISM=false
+          # export TORCH_DISTRIBUTED_DEBUG=INFO
+          # export TORCH_CPP_LOG_LEVEL=INFO
+          # export TORCH_NCCL_TRACE_BUFFER_SIZE=32
+          # export TORCH_NCCL_BLOCKING_WAIT=1
+          # export TORCH_NCCL_TRACE_CPP_STACK=1
+          # export NCCL_DEBUG=INFO
+
+          # for TPU
+          export PJRT_DEVICE=TPU
+          ulimit -l 68719476736
+          export XLA_USE_BF16=1
+          # ???
+          export LIBTPU_INIT_ARGS="--xla_tpu_scoped_vmem_limit_kib=98304 --xla_tpu_use_minor_sharding_for_major_trivial_input=true --xla_tpu_relayout_group_size_threshold_for_reduce_scatter=1 --xla_tpu_assign_all_reduce_scatter_layout=true  --xla_tpu_enable_data_parallel_all_reduce_opt=true --xla_tpu_data_parallel_opt_different_sized_ops=true  --xla_tpu_enable_all_experimental_scheduler_features=true  --xla_tpu_enable_scheduler_memory_pressure_tracking=true  --xla_tpu_host_transfer_overlap_limit=24 --xla_tpu_aggressive_opt_barrier_removal=ENABLED  --xla_lhs_prioritize_async_depth_over_stall=ENABLED --xla_tpu_enable_ag_backward_pipelining=true  --xla_should_allow_loop_variant_parameter_in_chain=ENABLED --xla_should_add_loop_invariant_op_in_chain=ENABLED --xla_max_concurrent_host_send_recv=100 --xla_tpu_scheduler_percent_shared_memory_limit=100 --xla_latency_hiding_scheduler_rerun=2 --xla_tpu_enable_sparse_core_collective_offload_all_reduce=false --xla_tpu_enable_all_reduce_offload_tracing=true"
+
+          # --mixed_precision=bf16 - best, but fails to work?
+          # --mixed_precision=fp16 - works, requires more memory
+          # --mixed_precision=no - ?
+
+          srun --propagate=ALL --label accelerate launch \
+              --config_file=fsdp_config.yaml \
+              --mixed_precision=bf16 \
+              --num_machines="${SLURM_NNODES}" \
+              --num_processes="\$((8 * SLURM_NNODES))" \
+              --rdzv_backend=c10d \
+              --main_process_ip="${HEAD_NODE_IP}" \
+              --main_process_port=29500 \
+              "${HOME}/run.py" \
+              --output_dir="${OUTPUT_PATH}" \
+              --lr_scheduler_type=constant_with_warmup \
+              --learning_rate=0.000005 \
+              --weight_decay=0.01 \
+              --warmup_ratio=0.05 \
+              --num_train_epochs=1 \
+              --max_steps=-1 \
+              --save_strategy=no \
+              --dataloader_num_workers=1 \
+              --per_device_train_batch_size=1 \
+              --log_level=info \
+              --logging_steps=0.01 \
+              --disable_tqdm=True
+
+      - type: data
+        destination: /opt/apps/scripts/robert-tpu-test/fsdp_config.yaml
+        # FSDP is not supported with TPU
+        #content: |
+        #  distributed_type: FSDP
+        #  fsdp_config:
+        #    fsdp_activation_checkpointing: false
+        #    fsdp_auto_wrap_policy: TRANSFORMER_BASED_WRAP
+        #    fsdp_backward_prefetch: BACKWARD_PRE
+        #    fsdp_cpu_ram_efficient_loading: true
+        #    fsdp_forward_prefetch: false
+        #    fsdp_offload_params: false
+        #    fsdp_sharding_strategy: FULL_SHARD
+        #    fsdp_state_dict_type: SHARDED_STATE_DICT
+        #    fsdp_sync_module_states: true
+        #    fsdp_use_orig_params: true
+        content: |
+          distributed_type: XLA
+          fsdp: full_shard
+          fsdp_config:
+              transformer_layer_cls_to_wrap: ["GemmaDecoderLayer"],
+              xla: true
+              xla_fsdp_v2: true
+              xla_fsdp_grad_ckpt": true
+
+
+      - type: data
+        destination: /opt/apps/scripts/robert-tpu-test/requirements.txt
+        content: |
+          # run with pip install -r requirements.txt -f https://storage.googleapis.com/libtpu-releases/index.html
+          transformers[torch]
+          datasets
+          accelerate
+
 
   - id: bucket_dataset
     source: community/modules/file-system/cloud-storage-bucket
@@ -120,6 +667,7 @@ deployment_groups:
       - pubsub.admin
       - storage.objectViewer
       - tpu.admin
+      - dns.admin
 
   - id: login_sa
     source: community/modules/project/service-account
@@ -149,104 +697,129 @@ deployment_groups:
 
   - id: tpu_nodeset-1
     source: community/modules/compute/schedmd-slurm-gcp-v6-nodeset-tpu
-    use: [network]
+    #use: [network]
     settings:
 #      accelerator_config:
 #        version: V6e
 #        topology: 1x1
       node_type: v6e-1
+#      node_conf:
+#        MemSpecLimit: 2048
       preserve_tpu: false
       node_count_dynamic_max: 32
       service_account_email: $(compute_sa.service_account_email)
+      subnetwork_self_link: $(network.subnetworks["${vars.region}/${vars.deployment_name}-tpu"].self_link)
 
   - id: tpu_nodeset-4
     source: community/modules/compute/schedmd-slurm-gcp-v6-nodeset-tpu
-    use: [network]
+    #use: [network]
     settings:
 #      accelerator_config:
 #        version: V6e
 #        topology: 2x2
       node_type: v6e-4
+#      node_conf:
+#        MemSpecLimit: 2048
       preemptible: false
       preserve_tpu: false
       node_count_dynamic_max: 64
       service_account_email: $(compute_sa.service_account_email)
+      subnetwork_self_link: $(network.subnetworks["${vars.region}/${vars.deployment_name}-tpu"].self_link)
 
   - id: tpu_nodeset-8
     source: community/modules/compute/schedmd-slurm-gcp-v6-nodeset-tpu
-    use: [network]
+    #use: [network]
     settings:
 #      accelerator_config:
 #        version: V6e
 #        topology: 2x4
       node_type: v6e-8
+#      node_conf:
+#        MemSpecLimit: 2048
       preemptible: false
       preserve_tpu: false
       node_count_dynamic_max: 64
+      subnetwork_self_link: $(network.subnetworks["${vars.region}/${vars.deployment_name}-tpu"].self_link)
 
   - id: tpu_nodeset-16
     source: community/modules/compute/schedmd-slurm-gcp-v6-nodeset-tpu
-    use: [network]
+    #use: [network]
     settings:
 #      accelerator_config:
 #        version: V6e
 #        topology: 4x4
       node_type: v6e-16
+#      node_conf:
+#        MemSpecLimit: 2048
       preemptible: false
       preserve_tpu: false
       node_count_dynamic_max: 64
       service_account_email: $(compute_sa.service_account_email)
+      subnetwork_self_link: $(network.subnetworks["${vars.region}/${vars.deployment_name}-tpu"].self_link)
 
   - id: tpu_nodeset-32
     source: community/modules/compute/schedmd-slurm-gcp-v6-nodeset-tpu
-    use: [network]
+    #use: [network]
     settings:
 #      accelerator_config:
 #        version: V6e
 #        topology: 4x8
       node_type: v6e-32
+#      node_conf:
+#        MemSpecLimit: 2048
       preemptible: false
       preserve_tpu: false
       node_count_dynamic_max: 64
+      service_account_email: $(compute_sa.service_account_email)
+      subnetwork_self_link: $(network.subnetworks["${vars.region}/${vars.deployment_name}-tpu"].self_link)
 
   - id: tpu_nodeset-64
     source: community/modules/compute/schedmd-slurm-gcp-v6-nodeset-tpu
-    use: [network]
+    #use: [network]
     settings:
 #      accelerator_config:
 #        version: V6e
 #        topology: 8x8
       node_type: v6e-64
+#      node_conf:
+#        MemSpecLimit: 2048
       preemptible: false
       preserve_tpu: false
       node_count_dynamic_max: 64
       service_account_email: $(compute_sa.service_account_email)
+      subnetwork_self_link: $(network.subnetworks["${vars.region}/${vars.deployment_name}-tpu"].self_link)
 
   - id: tpu_nodeset-128
     source: community/modules/compute/schedmd-slurm-gcp-v6-nodeset-tpu
-    use: [network]
+    #use: [network]
     settings:
 #      accelerator_config:
 #        version: V6e
 #        topology: 8x16
       node_type: v6e-128
+#      node_conf:
+#        MemSpecLimit: 2048
       preemptible: false
       preserve_tpu: false
       node_count_dynamic_max: 64
       service_account_email: $(compute_sa.service_account_email)
+      subnetwork_self_link: $(network.subnetworks["${vars.region}/${vars.deployment_name}-tpu"].self_link)
 
   - id: tpu_nodeset-256
     source: community/modules/compute/schedmd-slurm-gcp-v6-nodeset-tpu
-    use: [network]
+    #use: [network]
     settings:
 #      accelerator_config:
 #        version: V6e
 #        topology: 16x16
       node_type: v6e-256
+#      node_conf:
+#        MemSpecLimit: 2048
       preemptible: false
       preserve_tpu: false
       node_count_dynamic_max: 64
       service_account_email: $(compute_sa.service_account_email)
+      subnetwork_self_link: $(network.subnetworks["${vars.region}/${vars.deployment_name}-tpu"].self_link)
 
   - id: tpu_partition-1
     source: community/modules/compute/schedmd-slurm-gcp-v6-partition
@@ -303,7 +876,7 @@ deployment_groups:
       name: ns2
       node_count_dynamic_max: 10
       bandwidth_tier: gvnic_enabled
-      allow_automatic_updates: false
+      allow_automatic_updates: true
 
   - id: compute_partition
     source: community/modules/compute/schedmd-slurm-gcp-v6-partition
@@ -338,6 +911,7 @@ deployment_groups:
       enable_controller_public_ips: false
       machine_type: n2-standard-2
       login_startup_script: $(script.startup_script)
+      controller_startup_script: $(controller-setup.startup_script)
       service_account_email: $(controller_sa.service_account_email)
       enable_debug_logging: true
       extra_logging_flags:
