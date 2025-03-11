@@ -52,6 +52,10 @@ locals {
     bucket_path              = local.bucket_path
     enable_debug_logging     = var.enable_debug_logging
     extra_logging_flags      = var.extra_logging_flags
+    tpu_internal_domain      = var.tpu_dns.lookup.domain
+    tpu_internal_zone        = var.tpu_dns.lookup.zone_name
+    tpu_reverse_domain       = var.tpu_dns.reverse.domain
+    tpu_reverse_zone         = var.tpu_dns.reverse.zone_name
 
     # storage
     disable_default_mounts = var.disable_default_mounts
@@ -187,25 +191,48 @@ locals {
 
   slurm_gcp_devel_zip        = "slurm-gcp-devel.zip"
   slurm_gcp_devel_zip_bucket = format("%s/%s", local.bucket_dir, local.slurm_gcp_devel_zip)
+  slurm_gcp_devel_zip_files = toset([
+    for f in fileset(local.scripts_dir, "**") : f if !startswith(f, "tests/")
+  ])
+}
+
+resource "local_file" "debug" {
+  filename = "/tmp/wns-debug.json"
+  content  = jsonencode(local.slurm_gcp_devel_zip_files)
 }
 
 data "archive_file" "slurm_gcp_devel_zip" {
   output_path = "${local.build_dir}/${local.slurm_gcp_devel_zip}"
   type        = "zip"
-  source_dir  = local.scripts_dir
+  source {
+    content  = data.local_file.startup_sh.content
+    filename = "startup.sh"
+  }
+  # this approach has disadvantage of creating a zip file where all files have date modification of epoch
+  # but it is the only way to mix multiple data sources?
+  dynamic "source" {
+    for_each = local.slurm_gcp_devel_zip_files
+    content {
+      content  = data.local_file.slurm_gcp_devel[source.key].content
+      filename = source.key
+    }
+  }
+}
 
-  excludes = flatten([
-    fileset(local.scripts_dir, "tests/**"),
-    # TODO: consider removing (including nested) __pycache__ and all .* files
-    # Though it only affects developers
-  ])
+data "local_file" "slurm_gcp_devel" {
+  for_each = local.slurm_gcp_devel_zip_files
+  filename = "${local.scripts_dir}/${each.key}"
+}
 
+data "local_file" "startup_sh" {
+  filename = "${path.module}/../../../../internal/slurm-gcp-v6/instance_template/files/startup_sh_unlinted"
 }
 
 resource "google_storage_bucket_object" "devel" {
-  bucket = var.bucket_name
-  name   = local.slurm_gcp_devel_zip_bucket
-  source = data.archive_file.slurm_gcp_devel_zip.output_path
+  bucket         = var.bucket_name
+  name           = local.slurm_gcp_devel_zip_bucket
+  source         = data.archive_file.slurm_gcp_devel_zip.output_path
+  detect_md5hash = data.archive_file.slurm_gcp_devel_zip.output_md5
 }
 
 

@@ -105,7 +105,7 @@ function tpu_setup {
 	input_string=$($CURL $URL/instance/attributes/slurm_names)
 	worker_id=$($CURL $URL/instance/attributes/tpu-env | awk '/WORKER_ID/ {print $2}' | tr -d \')
 	real_name=$(parse_metadata $worker_id $input_string)
-
+  domain=$($CURL $URL/instance/attributes/slurm_tpu_domain)
 	#Prepare to docker pull with gcloud
 	mkdir -p /root/.docker
 	cat << EOF > /root/.docker/config.json
@@ -123,7 +123,7 @@ EOF
 		CGV=2
 	fi
 	if [ $CGV == 2 ]; then
-		CGROUP_FLAGS="--cgroup-parent=docker.slice --cgroupns=private --tmpfs /run --tmpfs /run/lock --tmpfs /tmp"
+		CGROUP_FLAGS="--cgroup-parent=docker.slice --cgroupns=private --tmpfs /run --tmpfs /run/lock --tmpfs /tmp:rw,exec,nosuid,mode=1777"
 		if [ ! -f /etc/systemd/system/docker.slice ]; then #In case that there is no slice prepared for hosting the containers create it
 			printf "[Unit]\nDescription=docker slice\nBefore=slices.target\n[Slice]\nCPUAccounting=true\nMemoryAccounting=true" > /etc/systemd/system/docker.slice
 			systemctl start docker.slice
@@ -138,14 +138,34 @@ EOF
 
   # pass the hostname into slurmd container, so the work distribution frameworks will be able to correctly
   # identify local address and hostname and coordinate the work
-	docker run -d $CGROUP_FLAGS $TPU_FLAGS --net=host --name=slurmd --hostname="$(hostname)" --entrypoint=/usr/bin/systemd --restart unless-stopped $docker_image
+	docker run -d $CGROUP_FLAGS $TPU_FLAGS --net=host --name=slurmd --hostname="${real_name}" --entrypoint=/usr/bin/systemd --restart unless-stopped $docker_image
 	# wait until file is there
-	local slurmd_config_path="/etc/default/slurmd"
-	until docker exec slurmd test -f $slurmd_config_path ; do
-	  sleep 1
-  done
-  # explicitly set node name as defined by $real_name, so slurmd recognizes, which Slurm node it is
-  docker exec slurmd /bin/bash -c "sed -i -e \"s/SLURMD_OPTIONS='/SLURMD_OPTIONS='-N \\\"${real_name}\\\" /\" $slurmd_config_path"
+	local hosts_path="/etc/hosts"
+	local ip_address
+	ip_address=$(hostname -i)
+	until docker exec slurmd grep "${ip_address}" ${hosts_path} ; do
+		sleep 1
+	done
+	# make sure that /etc/hosts entries match the hostname and
+	local tmp_file
+	tmp_file=$(mktemp)
+	# do the substitution on host OS, as resolver may consult it too
+	sed -i -e "s/^${ip_address} .*$/${ip_address} ${real_name} ${real_name}.${domain} /" ${hosts_path}
+	hostnamectl  hostname "${real_name}"
+	# for some reason inline sed ends with
+	# sed: cannot rename /etc/sedYyy8TV: Device or resource busy
+  docker exec slurmd /bin/bash -c "
+          tmp_file=$(mktemp)
+          sed -e 's/^${ip_address} .*$/${ip_address} ${real_name} ${real_name}.${domain} /' ${hosts_path} > ${tmp_file}
+          cp ${tmp_file} ${hosts_path}
+          rm ${tmp_file}
+  "
+  docker exec slurmd /bin/bash -c "
+          tmp_file=$(mktemp)
+          sed -e 's/^search/search ${domain}/' /etc/resolv.conf > ${tmp_file}
+          cp ${tmp_file} /etc/resolv.conf
+          rm ${tmp_file}
+  "
 	exit 0
 }
 

@@ -48,6 +48,7 @@ import slurm_gcp_plugins
 
 from google.cloud import secretmanager
 from google.cloud import storage
+from google.cloud import dns
 
 import google.auth  # noqa: E402
 from google.oauth2 import service_account  # noqa: E402
@@ -131,11 +132,12 @@ yaml.SafeDumper.yaml_representers[
 
 
 class ApiEndpoint(Enum):
-    COMPUTE = "compute"
     BQ = "bq"
+    COMPUTE = "compute"
+    DNS = "dns"
+    SECRET = "secret_manager"
     STORAGE = "storage"
     TPU = "tpu"
-    SECRET = "secret_manager"
 
 
 @lru_cache(maxsize=1)
@@ -1253,6 +1255,15 @@ class TPU:
             self.ac = self._client.get_accelerator_type(req).accelerator_configs[0]
         self.vmcount = self.__calc_vm_from_topology(self.ac.topology)
 
+        self.domain_name = lookup().cfg.tpu_internal_domain  # type: str
+        self.reverse_domain = lookup().cfg.domain.tpu_reverse_domain # type: str
+
+        dns_options = create_client_options(ApiEndpoint.DNS)
+        dns_client = dns.Client(client_options=dns_options)
+
+        self.dns_zone = dns_client.zone(lookup().cfg.tpu_internal_zone)
+        self.reverse_dns_zone = dns_client.zone(lookup().cfg.tpu_reverse_zone)
+
     @property
     def nodeset(self):
         return self._nodeset
@@ -1352,6 +1363,36 @@ class TPU:
         run(
             f"{lookup().scontrol} update nodename={nodename} nodeaddr={ip_addr} nodehostname={dns_name}"
         )
+        log.error("WNS registering node")
+        print("Printing registering node")
+        def update_record(zone: google.cloud.dns.zone.ManagedZone, record_name, record_value, record_type):
+            log.error(f"Adding IN {record_name} {record_name} -> {record_value}")
+            change = zone.changes()
+            add = zone.resource_record_set(record_name, record_type, 300, rrdatas=[record_value])
+            change.add_record_set(add)
+            try:
+                change.create()
+            except gExceptions.Conflict as e:
+                log.error("WNS already exists")
+                log.error(e)
+                print(e)
+                existing_records = {record.name: record for record in zone.list_resource_record_sets() if record.record_type == record_type}
+                if existing_record := existing_records.get(record_name):
+                    if set(existing_record.rrdatas) == set(record_value):
+                        return # record already exists, but it has the same value
+                    else:
+                        change = zone.changes()
+                        change.delete_record_set(existing_record)
+                        change.add_record_set(add)
+                        change.create()
+                        return
+                else:
+                    raise e
+        dns_name = f"{nodename}.{self.domain_name}"
+        update_record(self.dns_zone, dns_name, ip_addr, "A")
+        reversed_ip_addr = ".".join(reversed(ip_addr.split(".")))
+        update_record(self.reverse_dns_zone, f"{reversed_ip_addr}.in-addr.arpa.", dns_name, "PTR")
+
 
     def create_node(self, nodename):
         if self.vmcount > 1 and not isinstance(nodename, list):
@@ -1396,6 +1437,7 @@ class TPU:
             "slurm_bucket_path": lookup().cfg.bucket_path,
             "slurm_names": ";".join(slurm_names),
             "universe_domain": universe_domain(),
+            "slurm_tpu_domain": self.domain_name.rstrip(".")
         }
         node.tags = [lookup().cfg.slurm_cluster_name]
         if self.nodeset.service_account:
@@ -1422,6 +1464,22 @@ class TPU:
         return True
 
     def delete_node(self, nodename):
+        def delete_record(zone: google.cloud.dns.zone.ManagedZone, record_name, record_value, record_type):
+            log.error(f"Removing IN {record_name} {record_name} -> {record_value}")
+            change = zone.changes()
+            existing_record = zone.resource_record_set(record_name, record_type, 300, rrdatas=[record_value])
+            change.delete_record_set(existing_record)
+            change.create()
+        try:
+            dns_name = f"{nodename}.{self.domain_name}"
+            ip_addr = host_lookup(dns_name)
+            delete_record(self.dns_zone, dns_name, ip_addr, "A")
+            reversed_ip_addr = ".".join(reversed(ip_addr.split(".")))
+            delete_record(self.reverse_dns_zone, f"{reversed_ip_addr}.in-addr.arpa.", dns_name, "PTR")
+        except Exception as e:
+            log.error("Error during removal of the records")
+            log.error(e)
+
         request = tpu.DeleteNodeRequest(name=f"{self._parent}/nodes/{nodename}")
         try:
             resp = self._client.delete_node(request=request).result()

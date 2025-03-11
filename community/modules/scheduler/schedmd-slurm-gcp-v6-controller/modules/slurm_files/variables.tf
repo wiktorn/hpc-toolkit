@@ -44,6 +44,20 @@ variable "project_id" {
   type        = string
 }
 
+variable "tpu_dns" {
+  description = "Domain name to use internally for TPU support."
+  type = object({
+    lookup = object({
+      domain    = string
+      zone_name = string
+    })
+    reverse = object({
+      domain    = string
+      zone_name = string
+    })
+  })
+}
+
 #########
 # SLURM #
 #########

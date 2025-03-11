@@ -36,6 +36,19 @@ vars:
   # docker_image: us-docker.pkg.dev/wns-gsk-hpc/regus/slurm-tpu:2.15.0
   docker_image: us-docker.pkg.dev/wns-gsk-hpc/regus/slurm-tpu:6.8.6
   runtime_version: v2-alpha-tpuv6e # 2.18.0-pjrt-v5e-and-v6 # 2.18.0-pjrt-v5e-and-v6 # 2.14.0 #tf_version
+  internal_zone: "tpu.$(vars.project_id).internal"
+  setup_dns_runner:
+    type: shell
+    destination: setup_dns.sh
+    content: |
+      #!/bin/bash
+
+      set -e
+      set -o xtrace
+
+      echo "Domains=$(vars.internal_zone)" >> /etc/systemd/resolved.conf
+      systemctl restart systemd-resolved
+
 
 deployment_groups:
 - group: primary
@@ -63,25 +76,54 @@ deployment_groups:
         subnet_ip: 10.1.0.0/20
         subnet_private_access: true
 
+  - id: private-service-access
+    source: community/modules/network/private-service-access
+    use: [network]
+    settings:
+      prefix_length: 20 # can be up to /19
+      address: "10.128.0.0"
+
+  - id: homefs
+    source: modules/file-system/filestore
+    use:
+    - network
+    - private-service-access
+    settings:
+      filestore_share_name: homeshare
+      local_mount: /home
+      filestore_tier: BASIC_HDD
+      name: home
+      size_gb: 1024
+      mount_options: "defaults,_netdev,nconnect=7"
+      nfs_export_options:
+      - access_mode: "READ_WRITE"
+        squash_mode: "NO_ROOT_SQUASH"
+        ip_ranges:
+        - "10.0.0.0/8"
+
   - id: dns
-    source: github.com/GoogleCloudPlatform/cloud-foundation-fabric.git//modules/dns?ref=v38.0.0
+    source: github.com/GoogleCloudPlatform/cloud-foundation-fabric.git//modules/dns?ref=daily-2025.03.07
     settings:
       name: "tpu-zone"
       zone_config:
-        domain: "tpu.$(vars.project_id).internal."
+        domain: "$(vars.internal_zone)."
         private:
           client_networks:
           - $(network.network_self_link)
+      recordsets:
+        "A tpuv6-controller":
+          records:
+          - $(slurm_controller.slurm_controller_instance.network_interface[0].network_ip)
       #iam:
       #  "roles/dns.admin":
       #    - $(controller_sa.service_account_iam_email)
 
   - id: reverse_dns
-    source: github.com/GoogleCloudPlatform/cloud-foundation-fabric.git//modules/dns?ref=v38.0.0
+    source: github.com/GoogleCloudPlatform/cloud-foundation-fabric.git//modules/dns?ref=daily-2025.03.07
     settings:
       name: "reverse-tpu-zone"
       zone_config:
-        domain: "1.0.10.in-addr.arpa."
+        domain: "0.1.10.in-addr.arpa."
         private:
           client_networks:
           - $(network.network_self_link)
@@ -146,11 +188,13 @@ deployment_groups:
           chmod 0755 /usr/local/bin/node_recovery.sh
           systemctl daemon-reload
           systemctl enable --now node_recovery.timer
+      - $(vars.setup_dns_runner)
 
   - id: script
     source: modules/scripts/startup-script
     settings:
       runners:
+      - $(vars.setup_dns_runner)
       - type: shell
         destination: tpu_setup.sh
         content: |
@@ -566,6 +610,36 @@ deployment_groups:
           # export TORCH_NCCL_TRACE_CPP_STACK=1
           # export NCCL_DEBUG=INFO
 
+          #export PJRT_DEVICE=TPU
+          #ulimit -l 68719476736
+          ##     --config_file=fsdp_config.yaml \
+          #export ACCELERATE_USE_FSDP="false"
+          #export LIBTPU_INIT_ARGS="--xla_tpu_scoped_vmem_limit_kib=98304 --xla_tpu_use_minor_sharding_for_major_trivial_input=true --xla_tpu_relayout_group_size_threshold_for_reduce_scatter=1 --xla_tpu_assign_all_reduce_scatter_layout=true  --xla_tpu_enable_data_parallel_all_reduce_opt=true --xla_tpu_data_parallel_opt_different_sized_ops=true  --xla_tpu_enable_all_experimental_scheduler_features=true  --xla_tpu_enable_scheduler_memory_pressure_tracking=true  --xla_tpu_host_transfer_overlap_limit=24 --xla_tpu_aggressive_opt_barrier_removal=ENABLED  --xla_lhs_prioritize_async_depth_over_stall=ENABLED --xla_tpu_enable_ag_backward_pipelining=true  --xla_should_allow_loop_variant_parameter_in_chain=ENABLED --xla_should_add_loop_invariant_op_in_chain=ENABLED --xla_max_concurrent_host_send_recv=100 --xla_tpu_scheduler_percent_shared_memory_limit=100 --xla_latency_hiding_scheduler_rerun=2 --xla_tpu_enable_sparse_core_collective_offload_all_reduce=false --xla_tpu_enable_all_reduce_offload_tracing=true"
+          #
+          ##    --tpu \
+          #srun --propagate=ALL  --label accelerate launch \
+          #    --config_file=tpu.yaml \
+          #    --num_machines="${SLURM_NNODES}" \
+          #    --num_processes="\$((4 * SLURM_NNODES))" \
+          #    --main_process_ip="${HEAD_NODE_IP}" \
+          #    --main_training_function=main \
+          #    --main_process_port=29500 \
+          #    "run.py" \
+          #    --output_dir="${OUTPUT_PATH}" \
+          #    --lr_scheduler_type=constant_with_warmup \
+          #    --learning_rate=0.000005 \
+          #    --weight_decay=0.01 \
+          #    --warmup_ratio=0.05 \
+          #    --num_train_epochs=1 \
+          #    --max_steps=15 \
+          #    --save_strategy=no \
+          #    --dataloader_num_workers=1 \
+          #    --per_device_train_batch_size=1 \
+          #    --log_level=info \
+          #    --logging_steps=0.01 \
+          #    --disable_tqdm=True
+
+
           # for TPU
           export PJRT_DEVICE=TPU
           ulimit -l 68719476736
@@ -602,6 +676,8 @@ deployment_groups:
 
       - type: data
         destination: /opt/apps/scripts/robert-tpu-test/fsdp_config.yaml
+        # Parallelization is not supported on TPU
+        # https://github.com/huggingface/accelerate/issues/3058
         # FSDP is not supported with TPU
         #content: |
         #  distributed_type: FSDP
@@ -625,7 +701,8 @@ deployment_groups:
               xla_fsdp_v2: true
               xla_fsdp_grad_ckpt": true
 
-
+      # need a fix described here:
+      # https://github.com/huggingface/accelerate/issues/3358
       - type: data
         destination: /opt/apps/scripts/robert-tpu-test/requirements.txt
         content: |
@@ -633,7 +710,35 @@ deployment_groups:
           transformers[torch]
           datasets
           accelerate
+          torch~=2.6.0
+          torch_xla[tpu]~=2.6.0
 
+## other tests:
+# https://cloud.google.com/tpu/docs/pytorch-pods
+# git clone https://github.com/pytorch/xla.git
+
+#!/bin/bash
+
+#SBATCH --job-name=llm-finetuning
+#SBATCH --propagate=ALL
+#SBATCH --mem=650G
+#SBATCH --time=0-01:00:00
+#S BATCH --partition=a3
+#S BATCH --ntasks=2
+#S BATCH --nodes=2
+#S BATCH --cpus-per-task=48
+#S BATCH --gpus-per-task=8
+
+#ulimit -l 68719476736
+#date
+#python3 test/spmd/test_train_spmd_imagenet.py --fake_data --model=resnet50
+#date
+
+  - id: compute-startup
+    source: modules/scripts/startup-script
+    settings:
+      runners:
+      - $(vars.setup_dns_runner)
 
   - id: bucket_dataset
     source: community/modules/file-system/cloud-storage-bucket
@@ -877,6 +982,9 @@ deployment_groups:
       node_count_dynamic_max: 10
       bandwidth_tier: gvnic_enabled
       allow_automatic_updates: true
+      machine_type: n2-standard-2
+      service_account_email: $(compute_sa.service_account_email)
+      #startup_script: $(compute-startup.startup_script)
 
   - id: compute_partition
     source: community/modules/compute/schedmd-slurm-gcp-v6-partition
@@ -907,12 +1015,22 @@ deployment_groups:
     - compute_partition
     - slurm_login
     - network
+    - homefs
+
     settings:
       enable_controller_public_ips: false
       machine_type: n2-standard-2
       login_startup_script: $(script.startup_script)
+      compute_startup_script: $(compute-startup.startup_script)
       controller_startup_script: $(controller-setup.startup_script)
       service_account_email: $(controller_sa.service_account_email)
       enable_debug_logging: true
       extra_logging_flags:
         trace_api: true
+      tpu_dns:
+        lookup:
+          domain: $(dns.domain)
+          zone_name: $(dns.name)
+        reverse:
+          domain: $(reverse_dns.domain)
+          zone_name: $(reverse_dns.name)

@@ -85,6 +85,7 @@ deployment_groups:
         content: |
           #!/bin/sh
           pip install google-cloud-tpu==1.21.0
+          pip install google-cloud-dns==0.35.0
 
 - group: packer
   modules:

@@ -355,6 +355,7 @@ limitations under the License.
 | <a name="input_static_ips"></a> [static\_ips](#input\_static\_ips) | List of static IPs for VM instances. | `list(string)` | `[]` | no |
 | <a name="input_subnetwork_self_link"></a> [subnetwork\_self\_link](#input\_subnetwork\_self\_link) | Subnet to deploy to. | `string` | n/a | yes |
 | <a name="input_tags"></a> [tags](#input\_tags) | Network tag list. | `list(string)` | `[]` | no |
+| <a name="input_tpu_dns"></a> [tpu\_dns](#input\_tpu\_dns) | Domain name to use internally for TPU support. | <pre>object({<br/>    lookup = object({<br/>      domain    = string<br/>      zone_name = string<br/>    })<br/>    reverse = object({<br/>      domain    = string<br/>      zone_name = string<br/>    })<br/>  })</pre> | n/a | yes |
 | <a name="input_universe_domain"></a> [universe\_domain](#input\_universe\_domain) | Domain address for alternate API universe | `string` | `"googleapis.com"` | no |
 | <a name="input_zone"></a> [zone](#input\_zone) | Zone where the instances should be created. If not specified, instances will be<br/>spread across available zones in the region. | `string` | `null` | no |
 
