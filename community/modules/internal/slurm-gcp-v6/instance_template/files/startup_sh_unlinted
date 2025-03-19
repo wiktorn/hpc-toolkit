@@ -123,7 +123,7 @@ EOF
 		CGV=2
 	fi
 	if [ $CGV == 2 ]; then
-		CGROUP_FLAGS="--cgroup-parent=docker.slice --cgroupns=private --tmpfs /run --tmpfs /run/lock --tmpfs /tmp"
+		CGROUP_FLAGS="--cgroup-parent=docker.slice --cgroupns=private --tmpfs /run --tmpfs /run/lock --tmpfs /tmp:exec,nosuid,mode=1777"
 		if [ ! -f /etc/systemd/system/docker.slice ]; then #In case that there is no slice prepared for hosting the containers create it
 			printf "[Unit]\nDescription=docker slice\nBefore=slices.target\n[Slice]\nCPUAccounting=true\nMemoryAccounting=true" > /etc/systemd/system/docker.slice
 			systemctl start docker.slice
@@ -140,12 +140,12 @@ EOF
   # identify local address and hostname and coordinate the work
 	docker run -d $CGROUP_FLAGS $TPU_FLAGS --net=host --name=slurmd --hostname="$(hostname)" --entrypoint=/usr/bin/systemd --restart unless-stopped $docker_image
 	# wait until file is there
-	local slurmd_config_path="/etc/default/slurmd"
-	until docker exec slurmd test -f $slurmd_config_path ; do
-	  sleep 1
-  done
-  # explicitly set node name as defined by $real_name, so slurmd recognizes, which Slurm node it is
-  docker exec slurmd /bin/bash -c "sed -i -e \"s/SLURMD_OPTIONS='/SLURMD_OPTIONS='-N \\\"${real_name}\\\" /\" $slurmd_config_path"
+	local slurmd_config_path="/etc/sysconfig/slurmd"
+	until docker exec slurmd test -f $slurmd_config_path; do
+		sleep 1
+	done
+	# explicitly set node name as defined by $real_name, so slurmd recognizes, which Slurm node it is
+	docker exec slurmd /bin/bash -c "sed -i -e \"s/SLURMD_OPTIONS='/SLURMD_OPTIONS='-N \\\"${real_name}\\\" /\" $slurmd_config_path"
 	exit 0
 }
 

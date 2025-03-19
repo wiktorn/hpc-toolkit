@@ -36,6 +36,13 @@ vars:
   # docker_image: us-docker.pkg.dev/wns-gsk-hpc/regus/slurm-tpu:2.15.0
   docker_image: us-docker.pkg.dev/wns-gsk-hpc/regus/slurm-tpu:6.8.6
   runtime_version: v2-alpha-tpuv6e # 2.18.0-pjrt-v5e-and-v6 # 2.18.0-pjrt-v5e-and-v6 # 2.14.0 #tf_version
+  setup_nssswitch:
+    type: shell
+    destination: use_slurm_for_hosts.sh
+    content: |
+      #!/bin/bash
+
+      sed -i -e 's/^\(hosts:.*files\) /\1 slurm /' /etc/nsswitch.conf
 
 deployment_groups:
 - group: primary
@@ -62,6 +69,33 @@ deployment_groups:
         subnet_region: $(vars.region)
         subnet_ip: 10.1.0.0/20
         subnet_private_access: true
+
+  - id: private-service-access
+    source: community/modules/network/private-service-access
+    use: [network]
+    settings:
+      prefix_length: 20 # can be up to /19
+      address: "10.128.0.0"
+
+
+  - id: homefs
+    source: modules/file-system/filestore
+    use:
+    - network
+    - private-service-access
+    settings:
+      filestore_share_name: homeshare
+      local_mount: /home
+      filestore_tier: BASIC_HDD
+      name: home
+      size_gb: 1024
+      mount_options: "defaults,_netdev,nconnect=7"
+      nfs_export_options:
+      - access_mode: "READ_WRITE"
+        squash_mode: "NO_ROOT_SQUASH"
+        ip_ranges:
+        - "10.0.0.0/8"
+
 
   - id: dns
     source: github.com/GoogleCloudPlatform/cloud-foundation-fabric.git//modules/dns?ref=v38.0.0
@@ -146,11 +180,19 @@ deployment_groups:
           chmod 0755 /usr/local/bin/node_recovery.sh
           systemctl daemon-reload
           systemctl enable --now node_recovery.timer
+      # - $(vars.setup_nssswitch) # controller nodes don't have running slurmd, so nss_slurm doesn't wokr there
+
+  - id: compute-setup
+    source: modules/scripts/startup-script
+    settings:
+      runners:
+      - $(vars.setup_nssswitch)
 
   - id: script
     source: modules/scripts/startup-script
     settings:
       runners:
+      # - $(vars.setup_nssswitch) # login nodes don't have running slurmd, so nss_slurm doesn't wokr there
       - type: shell
         destination: tpu_setup.sh
         content: |
@@ -874,9 +916,11 @@ deployment_groups:
     use: [network]
     settings:
       name: ns2
+      machine_type: n2-standard-2
       node_count_dynamic_max: 10
       bandwidth_tier: gvnic_enabled
       allow_automatic_updates: true
+      service_account_email: $(compute_sa.service_account_email)
 
   - id: compute_partition
     source: community/modules/compute/schedmd-slurm-gcp-v6-partition
@@ -907,9 +951,11 @@ deployment_groups:
     - compute_partition
     - slurm_login
     - network
+    - homefs
     settings:
       enable_controller_public_ips: false
       machine_type: n2-standard-2
+      compute_startup_script: $(compute-setup.startup_script)
       login_startup_script: $(script.startup_script)
       controller_startup_script: $(controller-setup.startup_script)
       service_account_email: $(controller_sa.service_account_email)
