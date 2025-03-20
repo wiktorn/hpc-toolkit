@@ -3,8 +3,8 @@
 #SBATCH --job-name=llm-finetuning
 #SBATCH --time=1-00:00:00
 #SBATCH --partition=a3
-#SBATCH --ntasks=2
-#SBATCH --nodes=2
+#SBATCH --ntasks=4
+#SBATCH --nodes=4
 #SBATCH --cpus-per-task=48
 #SBATCH --mem=1800G
 #SBATCH --gpus-per-task=8
@@ -34,6 +34,8 @@ mkdir -p "${OUTPUT_PATH}"
 export HF_HOME=${SCRATCH_PREFIX}/.cache/huggingface
 export HF_HUB_DISABLE_PROGRESS_BARS=1
 export TOKENIZERS_PARALLELISM=false
+# export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+# export TORCH_LOGS=all
 # export TORCH_DISTRIBUTED_DEBUG=INFO
 # export TORCH_CPP_LOG_LEVEL=INFO
 # export TORCH_NCCL_TRACE_BUFFER_SIZE=32
