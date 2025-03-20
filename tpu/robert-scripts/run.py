@@ -1,3 +1,5 @@
+from dataclasses import dataclass, field
+
 from datasets import load_dataset
 from transformers import (
     AutoConfig,
@@ -10,19 +12,36 @@ from transformers import (
 )
 
 
+@dataclass
+class ModelArguments:
+    model_name: str = field(
+        default="meta-llama/Llama-3.1-70B-Instruct",
+        metadata={"help": "Name or path to model to train"},
+    )
+
+
+@dataclass
+class DatasetArguments:
+    dataset_name: str = field(
+        default="databricks/databricks-dolly-15k",
+        metadata={"help": "Name or path to dataset to use"},
+    )
+    max_seq_len: int = field(
+        default=1024,
+        metadata={"help": "Maximum sequence length to use from the dataset"},
+    )
+
+
 def main():
     """Run LLM finetuning"""
 
-    # model_name = "meta-llama/Llama-3.1-70B-Instruct"
-    model_name = "meta-llama/Llama-3.1-8B-Instruct"
-
-    parser = HfArgumentParser(TrainingArguments)
-    (training_args,) = parser.parse_args_into_dataclasses()
+    parser = HfArgumentParser((ModelArguments, DatasetArguments, TrainingArguments))
+    (model_args, dataset_args, training_args) = parser.parse_args_into_dataclasses()
 
     # Prepare dataset
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    tokenizer = AutoTokenizer.from_pretrained(model_args.model_name)
     tokenizer.pad_token = tokenizer.eos_token
-    dataset = load_dataset("databricks/databricks-dolly-15k")
+    dataset = load_dataset(dataset_args.dataset_name)
     dataset = dataset["train"]
     column_names = dataset.column_names
 
@@ -37,14 +56,15 @@ def main():
             tokenize=False,
             add_generation_prompt=False,
         )
-        item = tokenizer(item)
+        item = tokenizer(item, return_length=True)
         return item
 
     dataset = dataset.map(format_chat, remove_columns=column_names)
+    dataset = dataset.filter(lambda item: item["length"][0] <= dataset_args.max_seq_len)
 
     # Do training
-    config = AutoConfig.from_pretrained(model_name)
-    model = AutoModelForCausalLM.from_pretrained(model_name, config=config)
+    config = AutoConfig.from_pretrained(model_args.model_name)
+    model = AutoModelForCausalLM.from_pretrained(model_args.model_name, config=config)
     trainer = Trainer(
         model=model,
         args=training_args,
