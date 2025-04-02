@@ -42,7 +42,7 @@ vars:
     content: |
       #!/bin/bash
 
-      sed -i -e 's/^\(hosts:.*files\) /\1 slurm /' /etc/nsswitch.conf
+      echo sed -i -e 's/^\(hosts:.*files\) /\1 slurm /' /etc/nsswitch.conf
 
 deployment_groups:
 - group: primary
@@ -98,7 +98,7 @@ deployment_groups:
 
 
   - id: dns
-    source: github.com/GoogleCloudPlatform/cloud-foundation-fabric.git//modules/dns?ref=v38.0.0
+    source: github.com/GoogleCloudPlatform/cloud-foundation-fabric.git//modules/dns?ref=v38.1.0
     settings:
       name: "tpu-zone"
       zone_config:
@@ -111,7 +111,7 @@ deployment_groups:
       #    - $(controller_sa.service_account_iam_email)
 
   - id: reverse_dns
-    source: github.com/GoogleCloudPlatform/cloud-foundation-fabric.git//modules/dns?ref=v38.0.0
+    source: github.com/GoogleCloudPlatform/cloud-foundation-fabric.git//modules/dns?ref=v38.1.0
     settings:
       name: "reverse-tpu-zone"
       zone_config:
@@ -193,6 +193,13 @@ deployment_groups:
     settings:
       runners:
       # - $(vars.setup_nssswitch) # login nodes don't have running slurmd, so nss_slurm doesn't work there
+      - type: shell
+        destination: set_limits.sh
+        content: |
+          #!/bin/bash
+          echo "*   soft   memlock     68719476736" > /etc/security/limits.d/100-tpu.conf
+          echo "*   hard   memlock     68719476736" >> /etc/security/limits.d/100-tpu.conf
+
       - type: shell
         destination: tpu_setup.sh
         content: |
@@ -736,6 +743,8 @@ deployment_groups:
       - storage.objectViewer
       # - storage.legacyBucketReader  # needed to get storage.bucket.get
       - storage.admin  # needed to get storage.bucket.get
+      # for Vertex Tensorboard - https://cloud.devsite.corp.google.com/vertex-ai/docs/experiments/tensorboard-setup
+      - roles/aiplatform.user
 
   - id: tpu_nodeset-1
     source: community/modules/compute/schedmd-slurm-gcp-v6-nodeset-tpu
