@@ -1022,7 +1022,7 @@ deployment_groups:
             "use_cache": true,
             "vocab_size": 128256
           }
-  # for MPI jobs, we need to exclude some of the networks. For mpirun this can be achived using:
+  # for MPI jobs, we need to exclude some of the networks. For mpirun this can be achieved using:
   # --mca btl_tcp_if_exclude docker0,127.0.0.0/8
 
   - id: bucket_dataset
@@ -1303,6 +1303,7 @@ deployment_groups:
     - network
     - homefs
     settings:
+      controller_project_id: $(vars.project_id)
       enable_controller_public_ips: false
       machine_type: n2-standard-2
       compute_startup_script: $(compute-setup.startup_script)

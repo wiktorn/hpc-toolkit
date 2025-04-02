@@ -193,7 +193,7 @@ locals {
 }
 
 data "local_file" "startup_sh" {
-  filename = "${path.module}/../../../../internal/slurm-gcp-v6/instance_template/files/startup_sh_unlinted"
+  filename = "${path.module}/../../../../internal/slurm-gcp/instance_template/files/startup_sh_unlinted"
 }
 
 data "local_file" "slurm_gcp_devel" {
