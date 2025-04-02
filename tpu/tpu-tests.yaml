@@ -241,6 +241,8 @@ deployment_groups:
             fi
             source venv/bin/activate
             pip3 install -U pip3
+            # need to amend maxtext requirements.txt with:
+            # protobuf==4.25.6
             pip3 install --no-cache-dir -U -r maxtext/requirements.txt
             pip3 install --pre -U jax -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html
             pip3 install --pre -U jaxlib -f https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html
@@ -254,6 +256,8 @@ deployment_groups:
           # Run maxtext benchmark test.
           # (i.e.) python3 MaxText/train.py MaxText/configs/base.yml run_name=1xv4-128 base_output_directory=${PWD}/output/ dataset_path=gs://dataset_tpu/dataset async_checkpointing=False attention=dot_product steps=100
           # python3 MaxText/train.py MaxText/configs/base.yml run_name=<RUN_NAME> base_output_directory=${PWD}/output/ dataset_path=$(bucket_dataset.gcs_bucket_path)/ async_checkpointing=False attention=flash steps=100
+          # export M_COMPILE_TOPOLOGY_NUM_SLICES=${SLURM_JOB_NUM_NODES}
+          export OMPI_MCA_btl_tcp_if_exclude="docker0,127.0.0.0/8"
           srun bash ../run_llama31-70b-train.sh RUN_NAME="run_\$(date +%Y%m%d%H%M%S)" OUTPUT_PATH="$(bucket_output.gcs_bucket_path)" DATASET_PATH="$(bucket_dataset.gcs_bucket_path)/c4/en/3.0.1"
 
       - type: data
@@ -447,6 +451,9 @@ deployment_groups:
             dataset_type=synthetic gcs_metrics=true
           # testing using nightly build of JAX / TPU and company
 
+
+      # distributed JAX
+      # https://github.com/jax-ml/jax/issues/16788
       - type: data
         destination: /opt/apps/scripts/tpu-test/debug.sh
         content: |
@@ -649,8 +656,40 @@ deployment_groups:
               --logging_steps=0.01 \
               --disable_tqdm=True
 
+          export PJRT_DEVICE=TPU
+          export XLA_IR_DEBUG=1
+          export XLA_HLO_DEBUG=1
+          export PROFILE_EPOCH=0
+          export PROFILE_STEP=10
+          export PROFILE_DURATION_MS=240000
+          export PROFILE_LOGDIR=/tmp/home/profile
+          export XLA_USE_SPMD=1
+          export LIBTPU_INIT_ARGS="--xla_tpu_enable_flash_attention=false --xla_tpu_enable_async_collective_fusion=true --xla_tpu_enable_async_collective_fusion_fuse_all_gather=true --xla_tpu_enable_async_collective_fusion_multiple_steps=true --xla_tpu_overlap_compute_collective_tc=true --xla_enable_async_all_gather=true --xla_tpu_scoped_vmem_limit_kib=98304"
+
+          source venv-tpu/bin/activate
+          srun --time=30 --label python run.py \
+          --output_dir="${OUTPUT_PATH}" \
+          --optim=adafactor \
+          --dataloader_drop_last=true \
+          --fsdp="full_shard" \
+          --fsdp_config=fsdp_config.json \
+          --lr_scheduler_type=constant_with_warmup \
+          --learning_rate=0.000005 \
+          --weight_decay=0.01 \
+          --warmup_ratio=0.05 \
+          --num_train_epochs=1 \
+          --cache_dir "/tmp/cache" \
+          --max_steps=-1 \
+          --save_strategy=no \
+          --dataloader_num_workers=1 \
+          --per_device_train_batch_size=1 \
+          --log_level=info \
+          --logging_steps=0.01 \
+          --disable_tqdm=true
+
+
       - type: data
-        destination: /opt/apps/scripts/robert-tpu-test/fsdp_config.yaml
+        destination: /opt/apps/scripts/robert-tpu-test/fsdp_config.json
         # FSDP is not supported with TPU
         #content: |
         #  distributed_type: FSDP
@@ -665,16 +704,17 @@ deployment_groups:
         #    fsdp_state_dict_type: SHARDED_STATE_DICT
         #    fsdp_sync_module_states: true
         #    fsdp_use_orig_params: true
+
+          #"distributed_type": "XLA",
+          #"fsdp": "full_shard",
+
         content: |
-          distributed_type: XLA
-          fsdp: full_shard
-          fsdp_config:
-              transformer_layer_cls_to_wrap: ["GemmaDecoderLayer"],
-              xla: true
-              xla_fsdp_v2: true
-              xla_fsdp_grad_ckpt": true
-
-
+            {
+                "transformer_layer_cls_to_wrap": ["LlamaDecoderLayer"],
+                "xla": true,
+                "xla_fsdp_v2": true,
+                "xla_fsdp_grad_ckpt": true
+            }
       - type: data
         destination: /opt/apps/scripts/robert-tpu-test/requirements.txt
         content: |
@@ -683,6 +723,307 @@ deployment_groups:
           datasets
           accelerate
 
+      #- type: data
+      #  destination: /opt/apps/scripts/robert-tpu-test/create_env.sh
+      #  content: |
+      #    #!/bin/bash
+      #    # based on: https://github.com/pytorch-tpu/transformers/blob/flash_attention/USER_GUIDE.md
+      #    # that's for Llama 2 7B
+      #    python3.11 -m venv venv
+      #    source venv/bin/activate
+      #    # Step 1: install torch, torch-xla, libtpu, pallas
+      #    # pip3 install --pre torch --index-url https://download.pytorch.org/whl/nightly/cpu
+      #    pip3 install torch==2.6.0
+      #    # pip3 install https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch_xla-nightly-cp310-cp310-linux_x86_64.whl
+      #    # pip3 install torch_xla[tpu] -f https://storage.googleapis.com/libtpu-releases/index.html
+      #    pip3 install torch_xla[tpu,pallas] -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html -f https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html -f https://storage.googleapis.com/libtpu-releases/index.html
+      #
+      #    # Step 2: install HF
+      #    pip3 install git+https://github.com/pytorch-tpu/transformers.git@alanwaketan/flash_attention
+      #    git clone -b alanwaketan/flash_attention https://github.com/pytorch-tpu/transformers.git
+      #    # cd transformers
+      #    # pip3 install git+file://$PWD
+      #    pip3 install accelerate datasets evaluate scikit-learn huggingface-hub
+
+      - type: data
+        destination: /opt/apps/scripts/robert-tpu-test/create_env.sh
+        content: |
+          #!/bin/bash
+          # based on: https://github.com/pytorch-tpu/transformers/blob/flash_attention/USER_GUIDE.md
+          # that's for Llama 3.1 70B
+          python3.11 -m venv venv
+          source venv/bin/activate
+          # Step 1: install torch, torch-xla, libtpu, pallas
+          # pip3 install --pre torch --index-url https://download.pytorch.org/whl/nightly/cpu
+          pip3 install torch==2.6.0
+          # pip3 install https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch_xla-nightly-cp310-cp310-linux_x86_64.whl
+          # pip3 install torch_xla[tpu] -f https://storage.googleapis.com/libtpu-releases/index.html
+          pip3 install torch_xla[tpu,pallas] -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html -f https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html -f https://storage.googleapis.com/libtpu-releases/index.html
+
+          # Step 2: install HF
+          pip3 install git+https://github.com/pytorch-tpu/transformers.git@flash_attention_405b-no-minibatch
+          git clone -b flash_attention_405b-no-minibatch https://github.com/pytorch-tpu/transformers.git
+          # cd transformers
+          # pip3 install git+file://$PWD
+          pip3 install accelerate datasets evaluate scikit-learn huggingface-hub
+
+      - type: data
+        destination: dada
+        content: |
+          cd transformers
+          export PJRT_DEVICE=TPU
+          export XLA_USE_SPMD=1
+          export XLA_IR_DEBUG=1
+          export XLA_HLO_DEBUG=1
+
+          export PROFILE_EPOCH=0
+          export PROFILE_STEP=3
+          export PROFILE_DURATION_MS=20000
+          export PROFILE_LOGDIR=/tmp/home/
+          python3 examples/pytorch/language-modeling/run_clm.py \
+          --dataset_name wikitext \
+          --dataset_config_name wikitext-2-raw-v1 \
+          --per_device_train_batch_size 8 \
+          --do_train \
+          --output_dir /tmp/test-clm \
+          --overwrite_output_dir \
+          --config_name ../config.json \
+          --cache_dir /tmp \
+          --tokenizer_name meta-llama/Llama-3.1-8B-Instruct \
+          --block_size 4096 \
+          --optim adafactor \
+          --save_strategy no \
+          --logging_strategy no \
+          --fsdp "full_shard" \
+          --fsdp_config ../fsdp_config.json \
+          --torch_dtype bfloat16 \
+          --dataloader_drop_last yes \
+          --flash_attention \
+          --max_steps 5
+
+          python3 examples/pytorch/language-modeling/run_clm.py \
+          --dataset_name wikitext \
+          --dataset_config_name wikitext-2-raw-v1 \
+          --per_device_train_batch_size 8 \
+          --do_train \
+          --output_dir /tmp/test-clm \
+          --overwrite_output_dir \
+          --config_name ../config.json \
+          --cache_dir /tmp \
+          --tokenizer_name meta-llama/Llama-3.1-70B-Instruct \
+          --block_size 4096 \
+          --optim adafactor \
+          --save_strategy no \
+          --logging_strategy no \
+          --fsdp "full_shard" \
+          --fsdp_config ../fsdp_config.json \
+          --torch_dtype bfloat16 \
+          --dataloader_drop_last yes \
+          --flash_attention \
+          --max_steps 5
+
+          # 70B
+          export PJRT_DEVICE=TPU
+          export XLA_IR_DEBUG=1
+          export XLA_HLO_DEBUG=1
+          export PROFILE_EPOCH=0
+          export PROFILE_STEP=10
+          export PROFILE_DURATION_MS=240000
+          export PROFILE_LOGDIR=/tmp/home/profile
+          export XLA_USE_SPMD=1
+          export MAX_STEPS=40export
+          export LIBTPU_INIT_ARGS="--xla_tpu_enable_flash_attention=false --xla_tpu_enable_async_collective_fusion=true --xla_tpu_enable_async_collective_fusion_fuse_all_gather=true --xla_tpu_enable_async_collective_fusion_multiple_steps=true --xla_tpu_overlap_compute_collective_tc=true --xla_enable_async_all_gather=true --xla_tpu_scoped_vmem_limit_kib=98304"
+
+          python3 examples/pytorch/language-modeling/run_clm.py \
+          --dataset_name wikitext \
+          --dataset_config_name wikitext-103-raw-v1 \
+          --per_device_train_batch_size 128 \
+          --do_train \
+          --output_dir "$../output/test-clm" \
+          --overwrite_output_dir \
+          --config_name "../config.json" \
+          --cache_dir "/tmp/cache" \
+          --tokenizer_name meta-llama/Meta-Llama-3.1-70B \
+          --block_size "4096" \
+          --optim adafactor \
+          --save_strategy no \
+          --logging_strategy no \
+          --fsdp "full_shard" \
+          --fsdp_config "../fsdp_config.json" \
+          --torch_dtype bfloat16 \
+          --dataloader_drop_last yes \
+          --flash_attention \
+          --max_steps "5" \
+          --disable_tqdm=true
+
+          # --dataset_config_name databricks-dolly-15k \
+          python3 examples/pytorch/language-modeling/run_clm.py \
+          --dataset_name databricks/databricks-dolly-15k \
+          --per_device_train_batch_size 128 \
+          --do_train \
+          --output_dir "$../output/test-clm" \
+          --overwrite_output_dir \
+          --config_name "../config.json" \
+          --cache_dir "/tmp/cache" \
+          --tokenizer_name meta-llama/Meta-Llama-3.1-70B \
+          --block_size "4096" \
+          --optim adafactor \
+          --save_strategy no \
+          --logging_strategy no \
+          --fsdp "full_shard" \
+          --fsdp_config "../fsdp_config.json" \
+          --torch_dtype bfloat16 \
+          --dataloader_drop_last yes \
+          --flash_attention \
+          --max_steps "5" \
+          --disable_tqdm=true
+
+
+      - type: data
+        destination: /opt/apps/scripts/robert-tpu-test/config.json
+        # Source: https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct/blob/main/config.json
+        # ValueError: `rope_scaling` must be a dictionary with two fields, `type` and `factor`, got {'factor': 8.0, 'low_freq_factor': 1.0, 'high_freq_factor': 4.0, 'original_max_position_embeddings': 8192, 'rope_type': 'llama3'}
+        # ValueError: `rope_scaling`'s type field must be one of ['linear', 'dynamic'], got llama3
+        #content: |
+        #  {
+        #    "architectures": [
+        #      "LlamaForCausalLM"
+        #    ],
+        #    "attention_bias": false,
+        #    "attention_dropout": 0.0,
+        #    "bos_token_id": 128000,
+        #    "eos_token_id": [
+        #      128001,
+        #      128008,
+        #      128009
+        #    ],
+        #    "hidden_act": "silu",
+        #    "hidden_size": 4096,
+        #    "initializer_range": 0.02,
+        #    "intermediate_size": 14336,
+        #    "max_position_embeddings": 131072,
+        #    "mlp_bias": false,
+        #    "model_type": "llama",
+        #    "num_attention_heads": 32,
+        #    "num_hidden_layers": 32,
+        #    "num_key_value_heads": 8,
+        #    "pretraining_tp": 1,
+        #    "rms_norm_eps": 1e-05,
+        #    "rope_scaling": {
+        #      "factor": 8.0,
+        #      "low_freq_factor": 1.0,
+        #      "high_freq_factor": 4.0,
+        #      "original_max_position_embeddings": 8192,
+        #      "rope_type": "llama3"
+        #    },
+        #    "rope_theta": 500000.0,
+        #    "tie_word_embeddings": false,
+        #    "torch_dtype": "bfloat16",
+        #    "transformers_version": "4.42.3",
+        #    "use_cache": true,
+        #    "vocab_size": 128256
+        #  }
+
+        #content: |
+        #  {
+        #    "architectures": [
+        #      "LlamaForCausalLM"
+        #    ],
+        #    "attention_bias": false,
+        #    "attention_dropout": 0.0,
+        #    "bos_token_id": 128000,
+        #    "eos_token_id": [
+        #      128001,
+        #      128008,
+        #      128009
+        #    ],
+        #    "hidden_act": "silu",
+        #    "hidden_size": 4096,
+        #    "initializer_range": 0.02,
+        #    "intermediate_size": 14336,
+        #    "max_position_embeddings": 131072,
+        #    "mlp_bias": false,
+        #    "model_type": "llama",
+        #    "num_attention_heads": 32,
+        #    "num_hidden_layers": 32,
+        #    "num_key_value_heads": 8,
+        #    "pretraining_tp": 1,
+        #    "rms_norm_eps": 1e-05,
+        #    "rope_scaling": {
+        #      "factor": 8.0,
+        #      "type": "linear"
+        #    },
+        #    "rope_theta": 500000.0,
+        #    "tie_word_embeddings": false,
+        #    "torch_dtype": "bfloat16",
+        #    "transformers_version": "4.42.3",
+        #    "use_cache": true,
+        #    "vocab_size": 128256
+        #  }
+        #
+        #content: |
+        #  {
+        #    "_name_or_path": "meta-llama/Llama-2-7b-hf",
+        #    "architectures": [
+        #      "LlamaForCausalLM"
+        #    ],
+        #    "bos_token_id": 1,
+        #    "eos_token_id": 2,
+        #    "hidden_act": "silu",
+        #    "hidden_size": 4096,
+        #    "initializer_range": 0.02,
+        #    "intermediate_size": 11008,
+        #    "max_position_embeddings": 4096,
+        #    "model_type": "llama",
+        #    "num_attention_heads": 32,
+        #    "num_hidden_layers": 32,
+        #    "num_key_value_heads": 32,
+        #    "pretraining_tp": 1,
+        #    "rms_norm_eps": 1e-05,
+        #    "rope_scaling": null,
+        #    "tie_word_embeddings": false,
+        #    "torch_dtype": "float16",
+        #    "transformers_version": "4.31.0.dev0",
+        #    "use_cache": true,
+        #    "vocab_size": 32000
+        #  }
+        content: |
+          {
+            "architectures": [
+              "LlamaForCausalLM"
+            ],
+            "attention_bias": false,
+            "attention_dropout": 0.0,
+            "bos_token_id": 128000,
+            "eos_token_id": 128001,
+            "hidden_act": "silu",
+            "hidden_size": 8192,
+            "initializer_range": 0.02,
+            "intermediate_size": 28672,
+            "max_position_embeddings": 131072,
+            "mlp_bias": false,
+            "model_type": "llama",
+            "num_attention_heads": 64,
+            "num_hidden_layers": 80,
+            "num_key_value_heads": 8,
+            "pretraining_tp": 1,
+            "rms_norm_eps": 1e-05,
+            "rope_scaling": {
+              "factor": 8.0,
+              "low_freq_factor": 1.0,
+              "high_freq_factor": 4.0,
+              "original_max_position_embeddings": 8192,
+              "rope_type": "llama3"
+            },
+            "rope_theta": 500000.0,
+            "tie_word_embeddings": false,
+            "torch_dtype": "bfloat16",
+            "transformers_version": "4.42.3",
+            "use_cache": true,
+            "vocab_size": 128256
+          }
+  # for MPI jobs, we need to exclude some of the networks. For mpirun this can be achived using:
+  # --mca btl_tcp_if_exclude docker0,127.0.0.0/8
 
   - id: bucket_dataset
     source: community/modules/file-system/cloud-storage-bucket
