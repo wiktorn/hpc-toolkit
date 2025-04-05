@@ -755,12 +755,15 @@ deployment_groups:
           source venv/bin/activate
           # Step 1: install torch, torch-xla, libtpu, pallas
           # pip3 install --pre torch --index-url https://download.pytorch.org/whl/nightly/cpu
-          pip3 install torch==2.6.0
+          # pip3 install torch==2.6.0
           # pip3 install https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch_xla-nightly-cp310-cp310-linux_x86_64.whl
           # pip3 install torch_xla[tpu] -f https://storage.googleapis.com/libtpu-releases/index.html
-          pip3 install torch_xla[tpu,pallas] -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html -f https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html -f https://storage.googleapis.com/libtpu-releases/index.html
+          # pip3 install torch_xla[tpu,pallas] -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html -f https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html -f https://storage.googleapis.com/libtpu-releases/index.html
+          pip install torch~=2.6.0 'torch_xla[tpu]~=2.6.0' -f https://storage.googleapis.com/libtpu-releases/index.html -f https://storage.googleapis.com/libtpu-wheels/index.html
 
           # Step 2: install HF
+          # flash_attention branch fails to parse LLama 3.1 70-B config.json
+          # pip3 install git+https://github.com/pytorch-tpu/transformers.git@alanwaketan/flash_attention
           pip3 install git+https://github.com/pytorch-tpu/transformers.git@flash_attention_405b-no-minibatch
           git clone -b flash_attention_405b-no-minibatch https://github.com/pytorch-tpu/transformers.git
           # cd transformers
@@ -1085,22 +1088,22 @@ deployment_groups:
       # - storage.legacyBucketReader  # needed to get storage.bucket.get
       - storage.admin  # needed to get storage.bucket.get
       # for Vertex Tensorboard - https://cloud.devsite.corp.google.com/vertex-ai/docs/experiments/tensorboard-setup
-      - roles/aiplatform.user
+      - aiplatform.user
 
-  - id: tpu_nodeset-1
-    source: community/modules/compute/schedmd-slurm-gcp-v6-nodeset-tpu
-    #use: [network]
-    settings:
-#      accelerator_config:
-#        version: V6e
-#        topology: 1x1
-      node_type: v6e-1
-#      node_conf:
-#        MemSpecLimit: 2048
-      preserve_tpu: false
-      node_count_dynamic_max: 32
-      service_account_email: $(compute_sa.service_account_email)
-      subnetwork_self_link: $(network.subnetworks["${vars.region}/${vars.deployment_name}-tpu"].self_link)
+#  - id: tpu_nodeset-1
+#    source: community/modules/compute/schedmd-slurm-gcp-v6-nodeset-tpu
+#    #use: [network]
+#    settings:
+##      accelerator_config:
+##        version: V6e
+##        topology: 1x1
+#      node_type: v6e-1
+##      node_conf:
+##        MemSpecLimit: 2048
+#      preserve_tpu: false
+#      node_count_dynamic_max: 32
+#      service_account_email: $(compute_sa.service_account_email)
+#      subnetwork_self_link: $(network.subnetworks["${vars.region}/${vars.deployment_name}-tpu"].self_link)
 
   - id: tpu_nodeset-4
     source: community/modules/compute/schedmd-slurm-gcp-v6-nodeset-tpu
@@ -1213,15 +1216,16 @@ deployment_groups:
       service_account_email: $(compute_sa.service_account_email)
       subnetwork_self_link: $(network.subnetworks["${vars.region}/${vars.deployment_name}-tpu"].self_link)
 
-  - id: tpu_partition-1
-    source: community/modules/compute/schedmd-slurm-gcp-v6-partition
-    use: [tpu_nodeset-1]
-    settings:
-      partition_name: tpu1
+  #- id: tpu_partition-1
+  #  source: community/modules/compute/schedmd-slurm-gcp-v6-partition
+  #  use: [tpu_nodeset-1]
+  #  settings:
+  #    partition_name: tpu1
 
   - id: tpu_partition-4
     source: community/modules/compute/schedmd-slurm-gcp-v6-partition
-    use: [tpu_nodeset-4]
+    use:
+      - tpu_nodeset-4
     settings:
       partition_name: tpu4
 
@@ -1290,7 +1294,6 @@ deployment_groups:
   - id: slurm_controller
     source: community/modules/scheduler/schedmd-slurm-gcp-v6-controller
     use:
-    - tpu_partition-1
     - tpu_partition-4
     - tpu_partition-8
     - tpu_partition-16
