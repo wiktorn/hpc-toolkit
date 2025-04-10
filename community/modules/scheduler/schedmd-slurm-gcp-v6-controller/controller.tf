@@ -65,10 +65,11 @@ data "google_project" "controller_project" {
 resource "google_compute_disk" "controller_disk" {
   count = var.controller_state_disk != null ? 1 : 0
 
-  name = "${local.slurm_cluster_name}-controller-save"
-  type = var.controller_state_disk.type
-  size = var.controller_state_disk.size
-  zone = var.zone
+  project = local.controller_project_id
+  name    = "${local.slurm_cluster_name}-controller-save"
+  type    = var.controller_state_disk.type
+  size    = var.controller_state_disk.size
+  zone    = var.zone
 }
 
 # INSTANCE TEMPLATE
