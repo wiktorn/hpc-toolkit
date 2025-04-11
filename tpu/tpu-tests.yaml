@@ -760,6 +760,7 @@ deployment_groups:
           # pip3 install torch_xla[tpu] -f https://storage.googleapis.com/libtpu-releases/index.html
           # pip3 install torch_xla[tpu,pallas] -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html -f https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html -f https://storage.googleapis.com/libtpu-releases/index.html
           pip install torch~=2.6.0 'torch_xla[tpu]~=2.6.0' -f https://storage.googleapis.com/libtpu-releases/index.html -f https://storage.googleapis.com/libtpu-wheels/index.html
+          pip install jax~=0.5.4.dev20250406 jaxlib~=0.5.4.dev20250406 -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html -f https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html
 
           # Step 2: install HF
           # flash_attention branch fails to parse LLama 3.1 70-B config.json
@@ -1225,7 +1226,7 @@ deployment_groups:
   - id: tpu_partition-4
     source: community/modules/compute/schedmd-slurm-gcp-v6-partition
     use:
-      - tpu_nodeset-4
+    - tpu_nodeset-4
     settings:
       partition_name: tpu4
 
