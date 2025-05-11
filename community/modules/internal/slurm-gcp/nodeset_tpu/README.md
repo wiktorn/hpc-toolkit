@@ -82,6 +82,7 @@ No modules.
 | <a name="input_reserved"></a> [reserved](#input\_reserved) | Specify whether TPU-vms in this nodeset are created under a reservation. | `bool` | `false` | no |
 | <a name="input_runtime_version"></a> [runtime\_version](#input\_runtime\_version) | Nodeset runtinme version, see https://cloud.google.com/tpu/docs/runtimes#tpu_vm for details. | `string` | `"tpu-ubuntu2204-base"` | no |
 | <a name="input_service_account"></a> [service\_account](#input\_service\_account) | Service account to attach to the TPU-vm.<br/>If none is given, the default service account and scopes will be used. | <pre>object({<br/>    email  = string<br/>    scopes = set(string)<br/>  })</pre> | `null` | no |
+| <a name="input_spot"></a> [spot](#input\_spot) | Specify whether TPU-vms in this nodeset are spot, see https://cloud.google.com/tpu/docs/spot for details. | `bool` | `false` | no |
 | <a name="input_subnetwork"></a> [subnetwork](#input\_subnetwork) | The name of the subnetwork to attach the TPU-vm of this nodeset to. | `string` | n/a | yes |
 | <a name="input_zone"></a> [zone](#input\_zone) | Nodes will only be created in this zone. Check https://cloud.google.com/tpu/docs/regions-zones to get zones with TPU-vm in it. | `string` | n/a | yes |
 

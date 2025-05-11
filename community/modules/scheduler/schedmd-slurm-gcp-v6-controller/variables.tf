@@ -340,6 +340,7 @@ variable "nodeset_tpu" {
       email  = optional(string)
       scopes = optional(list(string), ["https://www.googleapis.com/auth/cloud-platform"])
     }))
+    spot       = optional(bool, false)
     project_id = string
     reserved   = optional(string, false)
   }))

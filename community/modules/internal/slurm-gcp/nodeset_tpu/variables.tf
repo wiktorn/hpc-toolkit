@@ -41,8 +41,8 @@ variable "accelerator_config" {
     version  = ""
   }
   validation {
-    condition     = var.accelerator_config.version == "" ? true : contains(["V2", "V3", "V4"], upper(var.accelerator_config.version))
-    error_message = "accelerator_config.version must be one of [\"V2\", \"V3\", \"V4\"]"
+    condition     = var.accelerator_config.version == "" ? true : contains(["V2", "V3", "V4", "V5e", "V5p", "V5e", "V6e"], upper(var.accelerator_config.version))
+    error_message = "accelerator_config.version must be one of [\"V2\", \"V3\", \"V4\", \"V5e\", \"V5p\", \"V6e\"]"
   }
   validation {
     condition     = var.accelerator_config.topology == "" ? true : can(regex("^[1-9]x[1-9](x[1-9])?$", var.accelerator_config.topology))
@@ -74,6 +74,12 @@ variable "zone" {
 
 variable "preemptible" {
   description = "Specify whether TPU-vms in this nodeset are preemtible, see https://cloud.google.com/tpu/docs/preemptible for details."
+  type        = bool
+  default     = false
+}
+
+variable "spot" {
+  description = "Specify whether TPU-vms in this nodeset are spot, see https://cloud.google.com/tpu/docs/spot for details."
   type        = bool
   default     = false
 }

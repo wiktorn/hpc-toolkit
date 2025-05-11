@@ -84,6 +84,9 @@ deployment_groups:
     - network
     - private-service-access
     settings:
+      deletion_protection:
+        enabled: true
+        reason: do not shoot myself in the foot
       filestore_share_name: homeshare
       local_mount: /home
       filestore_tier: BASIC_HDD
@@ -97,31 +100,63 @@ deployment_groups:
         - "10.0.0.0/8"
 
 
-  - id: dns
-    source: github.com/GoogleCloudPlatform/cloud-foundation-fabric.git//modules/dns?ref=v38.1.0
-    settings:
-      name: "tpu-zone"
-      zone_config:
-        domain: "tpu.$(vars.project_id).internal."
-        private:
-          client_networks:
-          - $(network.network_self_link)
-      #iam:
-      #  "roles/dns.admin":
-      #    - $(controller_sa.service_account_iam_email)
+  #- id: dns
+  #  source: github.com/GoogleCloudPlatform/cloud-foundation-fabric.git//modules/dns?ref=v38.1.0
+  #  settings:
+  #    name: "tpu-zone"
+  #    zone_config:
+  #      domain: "tpu.$(vars.project_id).internal."
+  #      private:
+  #        client_networks:
+  #        - $(network.network_self_link)
+  #    #iam:
+  #    #  "roles/dns.admin":
+  #    #    - $(controller_sa.service_account_iam_email)
+  #
+  #- id: reverse_dns
+  #  source: github.com/GoogleCloudPlatform/cloud-foundation-fabric.git//modules/dns?ref=v38.1.0
+  #  settings:
+  #    name: "reverse-tpu-zone"
+  #    zone_config:
+  #      domain: "1.0.10.in-addr.arpa."
+  #      private:
+  #        client_networks:
+  #        - $(network.network_self_link)
+  #    #iam:
+  #    #  "roles/dns.admin":
+  #    #  - $(controller_sa.service_account_iam_email)
 
-  - id: reverse_dns
-    source: github.com/GoogleCloudPlatform/cloud-foundation-fabric.git//modules/dns?ref=v38.1.0
+  - id: dns-response-policy
+    source: github.com/GoogleCloudPlatform/cloud-foundation-fabric.git//modules/dns-response-policy?ref=v38.1.0
     settings:
-      name: "reverse-tpu-zone"
-      zone_config:
-        domain: "1.0.10.in-addr.arpa."
-        private:
-          client_networks:
-          - $(network.network_self_link)
-      #iam:
-      #  "roles/dns.admin":
-      #  - $(controller_sa.service_account_iam_email)
+      project_id: $(vars.project_id)
+      name: "private-google-access"
+      networks:
+        primary: $(network.network_self_link)
+      rules:
+        googleapis-all:
+          dns_name: "*.googleapis.com."
+          local_data:
+            CNAME:
+              rrdatas: ["private.googleapis.com."]
+        googleapis-private:
+          dns_name: "private.googleapis.com."
+          local_data:
+            A:
+              rrdatas:
+              - 199.36.153.8
+              - 199.36.153.9
+              - 199.36.153.10
+              - 199.36.153.11
+        googleapis-restricted:
+          dns_name: "restricted.googleapis.com."
+          local_data:
+            A:
+              rrdatas:
+              - 199.36.153.4
+              - 199.36.153.5
+              - 199.36.153.6
+              - 199.36.153.7
 
   - id: controller-setup
     source: modules/scripts/startup-script
@@ -1091,20 +1126,20 @@ deployment_groups:
       # for Vertex Tensorboard - https://cloud.devsite.corp.google.com/vertex-ai/docs/experiments/tensorboard-setup
       - aiplatform.user
 
-#  - id: tpu_nodeset-1
-#    source: community/modules/compute/schedmd-slurm-gcp-v6-nodeset-tpu
-#    #use: [network]
-#    settings:
-##      accelerator_config:
-##        version: V6e
-##        topology: 1x1
-#      node_type: v6e-1
-##      node_conf:
-##        MemSpecLimit: 2048
-#      preserve_tpu: false
-#      node_count_dynamic_max: 32
-#      service_account_email: $(compute_sa.service_account_email)
-#      subnetwork_self_link: $(network.subnetworks["${vars.region}/${vars.deployment_name}-tpu"].self_link)
+  - id: tpu_nodeset-1
+    source: community/modules/compute/schedmd-slurm-gcp-v6-nodeset-tpu
+    #use: [network]
+    settings:
+#      accelerator_config:
+#        version: V6e
+#        topology: 1x1
+      node_type: v6e-1
+#      node_conf:
+#        MemSpecLimit: 2048
+      preserve_tpu: false
+      node_count_dynamic_max: 256
+      service_account_email: $(compute_sa.service_account_email)
+      subnetwork_self_link: $(network.subnetworks["${vars.region}/${vars.deployment_name}-tpu"].self_link)
 
   - id: tpu_nodeset-4
     source: community/modules/compute/schedmd-slurm-gcp-v6-nodeset-tpu
@@ -1128,13 +1163,14 @@ deployment_groups:
     settings:
 #      accelerator_config:
 #        version: V6e
-#        topology: 2x4
+#        topology: 4x4
       node_type: v6e-8
 #      node_conf:
 #        MemSpecLimit: 2048
       preemptible: false
       preserve_tpu: false
       node_count_dynamic_max: 64
+      service_account_email: $(compute_sa.service_account_email)
       subnetwork_self_link: $(network.subnetworks["${vars.region}/${vars.deployment_name}-tpu"].self_link)
 
   - id: tpu_nodeset-16
@@ -1217,11 +1253,11 @@ deployment_groups:
       service_account_email: $(compute_sa.service_account_email)
       subnetwork_self_link: $(network.subnetworks["${vars.region}/${vars.deployment_name}-tpu"].self_link)
 
-  #- id: tpu_partition-1
-  #  source: community/modules/compute/schedmd-slurm-gcp-v6-partition
-  #  use: [tpu_nodeset-1]
-  #  settings:
-  #    partition_name: tpu1
+  - id: tpu_partition-1
+    source: community/modules/compute/schedmd-slurm-gcp-v6-partition
+    use: [tpu_nodeset-1]
+    settings:
+      partition_name: tpu1
 
   - id: tpu_partition-4
     source: community/modules/compute/schedmd-slurm-gcp-v6-partition
@@ -1295,6 +1331,7 @@ deployment_groups:
   - id: slurm_controller
     source: community/modules/scheduler/schedmd-slurm-gcp-v6-controller
     use:
+    - tpu_partition-1
     - tpu_partition-4
     - tpu_partition-8
     - tpu_partition-16

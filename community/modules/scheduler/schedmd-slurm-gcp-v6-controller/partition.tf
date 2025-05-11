@@ -120,6 +120,7 @@ module "slurm_nodeset_tpu" {
   preserve_tpu           = each.value.preserve_tpu
   enable_public_ip       = each.value.enable_public_ip
   service_account        = each.value.service_account
+  spot                   = each.value.spot
   data_disks             = each.value.data_disks
   docker_image           = each.value.docker_image
   subnetwork             = each.value.subnetwork

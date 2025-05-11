@@ -62,6 +62,32 @@ locals {
       RealMemory     = 708 * 1024
     }
   }
+  node_exceptions_conf_hw = {
+    "v5e-1" = {
+      CPUs           = 24
+      Boards         = 1
+      Sockets        = 1
+      CoresPerSocket = 12
+      ThreadsPerCore = 2
+      RealMemory     = 47 * 1024
+    }
+    "v6e-1" = {
+      CPUs           = 44
+      Boards         = 1
+      Sockets        = 1
+      CoresPerSocket = 22
+      ThreadsPerCore = 2
+      RealMemory     = 172 * 1024
+    }
+    "v6e-8" = {
+      CPUs           = 180
+      Boards         = 1
+      Sockets        = 2
+      CoresPerSocket = 45
+      ThreadsPerCore = 2
+      RealMemory     = 1416 * 1024
+    }
+  }
   node_conf_mappings = {
     "v2"  = local.node_conf_hw.V2V3
     "v3"  = local.node_conf_hw.V2V3
@@ -83,12 +109,13 @@ locals {
   can_preempt = var.node_type != null ? contains(local.simple_nodes, var.node_type) : false
   nodeset_tpu = {
     nodeset_name           = var.nodeset_name
-    node_conf              = local.node_conf_mappings[local.tpu_fam]
+    node_conf              = lookup(local.node_exceptions_conf_hw, var.node_type, local.node_conf_mappings[local.tpu_fam])
     node_type              = var.node_type
     accelerator_config     = var.accelerator_config
     runtime_version        = var.runtime_version
     preemptible            = local.can_preempt ? var.preemptible : false
     reserved               = var.reserved
+    spot                   = var.spot
     node_count_dynamic_max = var.node_count_dynamic_max
     node_count_static      = var.node_count_static
     enable_public_ip       = var.enable_public_ip
